@@ -11,102 +11,21 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import {
+  INGREDIENT_CATEGORY_LABELS,
+  INGREDIENT_CATEGORY_ORDER,
+  ingredientCategory,
+  type IngredientCategory,
+} from '../data';
 import type { PantryScreenProps } from '../navigation/types';
 import { usePantryContext } from '../pantry';
 import { colors, radii } from '../theme/tokens';
 import { fonts } from '../theme/typography';
 
-type PantryCategory = 'produce' | 'protein' | 'pantry';
-
-const CATEGORY_ORDER: PantryCategory[] = ['produce', 'protein', 'pantry'];
-
-const CATEGORY_LABELS: Record<PantryCategory, string> = {
-  produce: 'Produce',
-  protein: 'Protein',
-  pantry: 'Pantry',
-};
-
-/** Rough keyword buckets for demo — first match wins (produce → protein → pantry). */
-function ingredientCategory(name: string): PantryCategory {
-  const n = name.toLowerCase();
-
-  const produceHints = [
-    'lettuce',
-    'spinach',
-    'kale',
-    'arugula',
-    'onion',
-    'garlic',
-    'tomato',
-    'carrot',
-    'potato',
-    'pepper',
-    'celery',
-    'cucumber',
-    'broccoli',
-    'cauliflower',
-    'zucchini',
-    'squash',
-    'mushroom',
-    'corn',
-    'apple',
-    'banana',
-    'orange',
-    'lemon',
-    'lime',
-    'berry',
-    'avocado',
-    'cilantro',
-    'parsley',
-    'basil',
-    'mint',
-    'scallion',
-    'green onion',
-    'asparagus',
-    'cabbage',
-    'chard',
-    'herb',
-    'ginger',
-  ];
-
-  const proteinHints = [
-    'chicken',
-    'beef',
-    'pork',
-    'turkey',
-    'lamb',
-    'duck',
-    'steak',
-    'bacon',
-    'sausage',
-    'salmon',
-    'tuna',
-    'fish',
-    'shrimp',
-    'prawn',
-    'cod',
-    'tilapia',
-    'egg',
-    'tofu',
-    'tempeh',
-    'yogurt',
-    'cheese',
-    'milk',
-    'ricotta',
-    'mozzarella',
-    'feta',
-    'paneer',
-  ];
-
-  if (produceHints.some((kw) => n.includes(kw))) return 'produce';
-  if (proteinHints.some((kw) => n.includes(kw))) return 'protein';
-  return 'pantry';
-}
-
 type GroupedEntry = { name: string; index: number };
 
-function groupByCategory(items: string[]): Record<PantryCategory, GroupedEntry[]> {
-  const buckets: Record<PantryCategory, GroupedEntry[]> = {
+function groupByCategory(items: string[]): Record<IngredientCategory, GroupedEntry[]> {
+  const buckets: Record<IngredientCategory, GroupedEntry[]> = {
     produce: [],
     protein: [],
     pantry: [],
@@ -193,13 +112,13 @@ export function PantryScreen({ navigation }: PantryScreenProps) {
             <Text style={styles.emptyMessage}>No ingredients yet</Text>
           ) : (
             <View style={styles.groupedWrap}>
-              {CATEGORY_ORDER.map((cat) => {
+              {INGREDIENT_CATEGORY_ORDER.map((cat) => {
                 const entries = grouped[cat];
                 if (entries.length === 0) return null;
                 return (
                   <View key={cat} style={styles.categoryBlock}>
                     <Text style={styles.categoryTitle}>
-                      {CATEGORY_LABELS[cat]}
+                      {INGREDIENT_CATEGORY_LABELS[cat]}
                     </Text>
                     <View style={styles.chipsWrap}>
                       {entries.map(({ name, index }) => (

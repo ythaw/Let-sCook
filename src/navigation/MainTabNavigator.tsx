@@ -3,7 +3,7 @@ import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { HomeScreen } from '../screens/HomeScreen';
 import { PantryScreen } from '../screens/PantryScreen';
 import { ProfileScreen } from '../screens/ProfileScreen';
-import { ShoppingScreen } from '../screens/ShoppingScreen';
+import { ShoppingListScreen } from '../screens/ShoppingListScreen';
 import { colors } from '../theme/tokens';
 import type { MainTabParamList } from './types';
 
@@ -45,7 +45,7 @@ export function MainTabNavigator() {
       />
       <Tab.Screen
         name="Shopping"
-        component={ShoppingScreen}
+        component={ShoppingListScreen}
         options={{
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="cart-outline" size={size} color={color} />

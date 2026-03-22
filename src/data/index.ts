@@ -1,4 +1,13 @@
 export * from './types';
+export {
+  INGREDIENT_CATEGORY_LABELS,
+  INGREDIENT_CATEGORY_ORDER,
+  PANTRY_KEYWORD_HINTS,
+  PRODUCE_KEYWORD_HINTS,
+  PROTEIN_KEYWORD_HINTS,
+  ingredientCategory,
+  type IngredientCategory,
+} from './ingredientCategory';
 export { DEMO_PROFILE } from './demoProfile';
 export { DEMO_PANTRY } from './demoPantry';
 export { DEMO_RECIPES } from './demoRecipes';
