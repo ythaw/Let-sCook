@@ -8,10 +8,7 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
-import {
-  SafeAreaView,
-  useSafeAreaInsets,
-} from 'react-native-safe-area-context';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import type { ChatScreenParams, HomeScreenProps } from '../navigation/types';
 import { colors, radii } from '../theme/tokens';
 import { fonts } from '../theme/typography';
@@ -50,7 +47,6 @@ function chatParams(
 }
 
 export function HomeScreen({ navigation }: HomeScreenProps) {
-  const insets = useSafeAreaInsets();
   const { width } = useWindowDimensions();
   const cardW = Math.min(width * 0.58, 220);
   const [meal, setMeal] = useState<MealFilter>('all');
@@ -202,27 +198,8 @@ export function HomeScreen({ navigation }: HomeScreenProps) {
           </View>
         ))}
 
-        <View style={{ height: 100 }} />
+        <View style={{ height: 28 }} />
       </ScrollView>
-
-      <View style={[styles.bottomNav, { paddingBottom: Math.max(14, insets.bottom) }]}>
-        <View style={styles.navInner}>
-          <View style={[styles.navItem, styles.navItemActive]}>
-            <View style={styles.navIconBg}>
-              <Ionicons name="home" size={22} color={colors.terracotta} />
-            </View>
-          </View>
-          <View style={styles.navItem}>
-            <Ionicons name="grid-outline" size={24} color={colors.textMuted} />
-          </View>
-          <View style={styles.navItem}>
-            <Ionicons name="clipboard-outline" size={24} color={colors.textMuted} />
-          </View>
-          <View style={styles.navItem}>
-            <Ionicons name="person-outline" size={24} color={colors.textMuted} />
-          </View>
-        </View>
-      </View>
     </SafeAreaView>
   );
 }
@@ -477,37 +454,6 @@ const styles = StyleSheet.create({
     height: 44,
     borderRadius: 22,
     backgroundColor: colors.terracotta,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  bottomNav: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: colors.background,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: colors.border,
-    paddingBottom: 18,
-    paddingTop: 10,
-  },
-  navInner: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    alignItems: 'center',
-    paddingHorizontal: 12,
-  },
-  navItem: {
-    padding: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  navItemActive: {},
-  navIconBg: {
-    width: 48,
-    height: 48,
-    borderRadius: 16,
-    backgroundColor: colors.peach,
     alignItems: 'center',
     justifyContent: 'center',
   },
