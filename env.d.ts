@@ -10,5 +10,14 @@ declare namespace NodeJS {
     EXPO_PUBLIC_GEMINI_MODEL?: string;
     /** Optional; default https://generativelanguage.googleapis.com/v1beta/models */
     EXPO_PUBLIC_GEMINI_API_BASE?: string;
+
+    /** ElevenLabs — speech-to-text + text-to-speech (see .env.example) */
+    EXPO_PUBLIC_ELEVENLABS_API_KEY?: string;
+    /** Voice ID from ElevenLabs (Voices page); required for read-aloud */
+    EXPO_PUBLIC_ELEVENLABS_VOICE_ID?: string;
+    /** Optional; default scribe_v2 */
+    EXPO_PUBLIC_ELEVENLABS_STT_MODEL?: string;
+    /** Optional; default eleven_multilingual_v2 */
+    EXPO_PUBLIC_ELEVENLABS_TTS_MODEL?: string;
   }
 }
