@@ -32,7 +32,7 @@ export type PantryScreenProps = CompositeScreenProps<
   NativeStackScreenProps<RootStackParamList>
 >;
 
-export type ShoppingScreenProps = BottomTabScreenProps<
+export type ShoppingListScreenProps = BottomTabScreenProps<
   MainTabParamList,
   'Shopping'
 >;
