@@ -2,6 +2,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
 import { useCallback, useMemo, useRef, useState } from 'react';
 import {
+  ActivityIndicator,
   FlatList,
   KeyboardAvoidingView,
   Platform,
@@ -13,7 +14,10 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { buildChefSystemPrompt } from '../ai/chefSystemPrompt';
 import { explainRecipeById, getMockChefReply } from '../ai/mockChefAI';
+import type { ChefChatTurn } from '../ai/chefChatTypes';
+import { completeChefChat, readGeminiConfigFromEnv } from '../ai/geminiChef';
 import { DEMO_PROFILE, getRecipeById, type DemoRecipe } from '../data';
 import type { ChatScreenProps } from '../navigation/types';
 import { colors, radii } from '../theme/tokens';
@@ -23,9 +27,17 @@ type Msg = { id: string; role: 'user' | 'assistant'; text: string };
 
 const firstName = DEMO_PROFILE.displayName.split(' ')[0] ?? 'there';
 
+function toChefTurns(msgs: Msg[]): ChefChatTurn[] {
+  return msgs
+    .filter((m) => m.role === 'user' || m.role === 'assistant')
+    .slice(-24)
+    .map((m) => ({ role: m.role, content: m.text }));
+}
+
 function buildOpeningThread(
   recommended: DemoRecipe[],
-  explainRecipeId?: string
+  explainRecipeId: string | undefined,
+  liveModel: boolean
 ): Msg[] {
   const openedRecipe =
     explainRecipeId != null ? getRecipeById(explainRecipeId) : undefined;
@@ -38,11 +50,15 @@ function buildOpeningThread(
     welcomeText = `Hi ${firstName} — There aren’t any fully-in-pantry matches for the filter you used on home, but you can still ask questions or use recipe chips if any appear.`;
   }
 
+  const modeNote = liveModel
+    ? 'Responses use Google Gemini (AI Studio key from .env). Never ship that key in a public app — use a backend proxy for production.'
+    : 'No Gemini API key set — using offline demo replies. Add EXPO_PUBLIC_GEMINI_API_KEY (or EXPO_PUBLIC_GOOGLE_AI_API_KEY) to .env.';
+
   const msgs: Msg[] = [
     {
       id: 'welcome',
       role: 'assistant',
-      text: `${welcomeText}\n\n(This assistant uses on-device demo logic, not a cloud model.)`,
+      text: `${welcomeText}\n\n(${modeNote})`,
     },
   ];
 
@@ -88,6 +104,11 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<Msg[]>([]);
   const [pickerRecipes, setPickerRecipes] = useState<DemoRecipe[]>([]);
+  const [sending, setSending] = useState(false);
+
+  const { apiKey: geminiKey, model: geminiModel, apiBaseUrl: geminiBase } =
+    useMemo(() => readGeminiConfigFromEnv(), []);
+  const liveModel = Boolean(geminiKey);
 
   const params = route.params;
 
@@ -98,11 +119,13 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
         .map((id) => getRecipeById(id))
         .filter((x): x is DemoRecipe => Boolean(x));
       setPickerRecipes(resolved);
-      setMessages(buildOpeningThread(resolved, params?.explainRecipeId));
+      setMessages(
+        buildOpeningThread(resolved, params?.explainRecipeId, liveModel)
+      );
       requestAnimationFrame(() =>
         listRef.current?.scrollToEnd({ animated: false })
       );
-    }, [params?.recommendedIds, params?.explainRecipeId])
+    }, [params?.recommendedIds, params?.explainRecipeId, liveModel])
   );
 
   const recipeChips = useMemo(() => {
@@ -115,45 +138,125 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
     return [...m.values()];
   }, [pickerRecipes, params?.explainRecipeId]);
 
-  const appendRecipeExplanation = useCallback((recipe: DemoRecipe) => {
-    const detail = explainRecipeById(recipe.id);
-    setMessages((prev) => [
-      ...prev,
-      {
+  const appendRecipeExplanation = useCallback(
+    async (recipe: DemoRecipe) => {
+      if (sending) return;
+      const userMsg: Msg = {
         id: `u-${Date.now()}`,
         role: 'user',
-        text: `Explain “${recipe.title}” in full detail.`,
-      },
-      {
-        id: `a-${Date.now()}`,
-        role: 'assistant',
-        text: detail ?? 'I couldn’t find that recipe.',
-      },
-    ]);
-    requestAnimationFrame(() =>
-      listRef.current?.scrollToEnd({ animated: true })
-    );
-  }, []);
+        text: `Explain “${recipe.title}” in full detail (ingredients, time, nutrition, allergies, step-by-step).`,
+      };
+      setMessages((prev) => [...prev, userMsg]);
+      setSending(true);
+      try {
+        let assistantText: string;
+        if (geminiKey) {
+          const systemPrompt = buildChefSystemPrompt(
+            pickerRecipes.map((r) => r.title)
+          );
+          const history = toChefTurns([...messages, userMsg]);
+          assistantText = await completeChefChat({
+            apiKey: geminiKey,
+            model: geminiModel,
+            systemPrompt,
+            messages: history,
+            apiBaseUrl: geminiBase,
+          });
+        } else {
+          assistantText =
+            explainRecipeById(recipe.id) ?? 'I couldn’t find that recipe.';
+        }
+        setMessages((prev) => [
+          ...prev,
+          { id: `a-${Date.now()}`, role: 'assistant', text: assistantText },
+        ]);
+      } catch (e) {
+        const err = e instanceof Error ? e.message : String(e);
+        const fallback =
+          explainRecipeById(recipe.id) ?? 'I couldn’t find that recipe.';
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `a-${Date.now()}`,
+            role: 'assistant',
+            text: `Couldn’t reach the model (${err}). Offline version:\n\n${fallback}`,
+          },
+        ]);
+      } finally {
+        setSending(false);
+        requestAnimationFrame(() =>
+          listRef.current?.scrollToEnd({ animated: true })
+        );
+      }
+    },
+    [
+      sending,
+      geminiKey,
+      geminiModel,
+      geminiBase,
+      pickerRecipes,
+      messages,
+    ]
+  );
 
-  const send = useCallback(() => {
+  const send = useCallback(async () => {
     const t = input.trim();
-    if (!t) return;
+    if (!t || sending) return;
     setInput('');
     const userMsg: Msg = {
       id: `u-${Date.now()}`,
       role: 'user',
       text: t,
     };
-    const reply: Msg = {
-      id: `a-${Date.now()}`,
-      role: 'assistant',
-      text: getMockChefReply(t),
-    };
-    setMessages((m) => [...m, userMsg, reply]);
-    requestAnimationFrame(() =>
-      listRef.current?.scrollToEnd({ animated: true })
-    );
-  }, [input]);
+    setMessages((prev) => [...prev, userMsg]);
+    setSending(true);
+    try {
+      let assistantText: string;
+      if (geminiKey) {
+        const systemPrompt = buildChefSystemPrompt(
+          pickerRecipes.map((r) => r.title)
+        );
+        const history = toChefTurns([...messages, userMsg]);
+        assistantText = await completeChefChat({
+          apiKey: geminiKey,
+          model: geminiModel,
+          systemPrompt,
+          messages: history,
+          apiBaseUrl: geminiBase,
+        });
+      } else {
+        assistantText = getMockChefReply(t);
+      }
+      setMessages((prev) => [
+        ...prev,
+        { id: `a-${Date.now()}`, role: 'assistant', text: assistantText },
+      ]);
+    } catch (e) {
+      const err = e instanceof Error ? e.message : String(e);
+      const fallback = getMockChefReply(t);
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `a-${Date.now()}`,
+          role: 'assistant',
+          text: `Couldn’t reach the model (${err}). Offline reply:\n\n${fallback}`,
+        },
+      ]);
+    } finally {
+      setSending(false);
+      requestAnimationFrame(() =>
+        listRef.current?.scrollToEnd({ animated: true })
+      );
+    }
+  }, [
+    input,
+    sending,
+    messages,
+    geminiKey,
+    geminiModel,
+    geminiBase,
+    pickerRecipes,
+  ]);
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -226,7 +329,8 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
                     styles.recipeChip,
                     pressed && { opacity: 0.88 },
                   ]}
-                  onPress={() => appendRecipeExplanation(r)}
+                  onPress={() => void appendRecipeExplanation(r)}
+                  disabled={sending}
                 >
                   <Text style={styles.recipeChipEmoji}>{r.emoji}</Text>
                   <Text style={styles.recipeChipTitle} numberOfLines={2}>
@@ -249,11 +353,18 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
             maxLength={2000}
           />
           <Pressable
-            style={[styles.sendBtn, !input.trim() && styles.sendBtnDisabled]}
-            onPress={send}
-            disabled={!input.trim()}
+            style={[
+              styles.sendBtn,
+              (!input.trim() || sending) && styles.sendBtnDisabled,
+            ]}
+            onPress={() => void send()}
+            disabled={!input.trim() || sending}
           >
-            <Ionicons name="send" size={20} color={colors.white} />
+            {sending ? (
+              <ActivityIndicator color={colors.white} size="small" />
+            ) : (
+              <Ionicons name="send" size={20} color={colors.white} />
+            )}
           </Pressable>
         </View>
       </KeyboardAvoidingView>
