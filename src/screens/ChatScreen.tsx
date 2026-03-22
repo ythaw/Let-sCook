@@ -413,6 +413,28 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
           </View>
         ) : null}
 
+        {pantryCookRecipe ? (
+          <View style={styles.cookBar}>
+            <Text style={styles.cookBarText} numberOfLines={2}>
+              Cooked “{pantryCookRecipe.title}”? Subtract matched pantry items.
+            </Text>
+            <View style={styles.cookBarActions}>
+              <Pressable
+                style={styles.cookBarDismiss}
+                onPress={() => setPantryCookRecipe(null)}
+              >
+                <Text style={styles.cookBarDismissText}>Not now</Text>
+              </Pressable>
+              <Pressable
+                style={styles.cookBarPrimary}
+                onPress={promptConsumePantry}
+              >
+                <Text style={styles.cookBarPrimaryText}>Review & update</Text>
+              </Pressable>
+            </View>
+          </View>
+        ) : null}
+
         <View style={styles.composer}>
           <TextInput
             style={styles.input}
