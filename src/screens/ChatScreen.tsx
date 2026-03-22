@@ -14,11 +14,22 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import * as ExpoAV from 'expo-av';
+import {
+  InterruptionModeAndroid,
+  InterruptionModeIOS,
+} from 'expo-av';
+import { File, Paths } from 'expo-file-system';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { buildChefSystemPrompt } from '../ai/chefSystemPrompt';
+import {
+  readElevenLabsConfigFromEnv,
+  synthesizeSpeechToMp3,
+  transcribeAudioFromUri,
+} from '../ai/elevenlabsVoice';
+import { completeChefChat, readGeminiConfigFromEnv } from '../ai/geminiChef';
 import { explainRecipeById, getMockChefReply } from '../ai/mockChefAI';
 import type { ChefChatTurn } from '../ai/chefChatTypes';
-import { completeChefChat, readGeminiConfigFromEnv } from '../ai/geminiChef';
 import {
   DEMO_PROFILE,
   getRecipeById,
@@ -27,12 +38,15 @@ import {
   type DemoRecipe,
 } from '../data';
 import type { ChatScreenProps } from '../navigation/types';
+import { parseVoiceCookCommand } from '../chef/voiceCookCommands';
 import { usePantryContext } from '../pantry';
 import type { PantryStockItem } from '../pantry/types';
 import { colors, radii } from '../theme/tokens';
 import { fonts } from '../theme/typography';
 
 type Msg = { id: string; role: 'user' | 'assistant'; text: string };
+
+type VoiceCookSession = { recipeId: string; stepIndex: number };
 
 const firstName = DEMO_PROFILE.displayName.split(' ')[0] ?? 'there';
 
@@ -61,8 +75,8 @@ function buildOpeningThread(
   }
 
   const modeNote = liveModel
-    ? 'Responses use Google Gemini (AI Studio key from .env). Never ship that key in a public app — use a backend proxy for production.'
-    : 'No Gemini API key set — using offline demo replies. Add EXPO_PUBLIC_GEMINI_API_KEY (or EXPO_PUBLIC_GOOGLE_AI_API_KEY) to .env.';
+    ? 'Replies use smart AI, tuned to your pantry and these recipes.'
+    : 'You can open any recipe below for full walkthroughs.';
 
   const msgs: Msg[] = [
     {
@@ -124,7 +138,122 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
     useMemo(() => readGeminiConfigFromEnv(), []);
   const liveModel = Boolean(geminiKey);
 
+  const elevenLabsCfg = useMemo(() => readElevenLabsConfigFromEnv(), []);
+  const elevenVoiceReady = Boolean(
+    elevenLabsCfg.apiKey && elevenLabsCfg.voiceId
+  );
+  const canVoiceInput =
+    Platform.OS !== 'web' && Boolean(elevenLabsCfg.apiKey);
+
+  type ChefRecording = Awaited<
+    ReturnType<typeof ExpoAV.Audio.Recording.createAsync>
+  >['recording'];
+  const recordingRef = useRef<ChefRecording | null>(null);
+  const soundRef = useRef<ExpoAV.Audio.Sound | null>(null);
+  const [isRecording, setIsRecording] = useState(false);
+  const [voiceBusy, setVoiceBusy] = useState(false);
+  const [speakReplies, setSpeakReplies] = useState(true);
+  const [voiceCookSession, setVoiceCookSession] =
+    useState<VoiceCookSession | null>(null);
+  const voiceCookRef = useRef<VoiceCookSession | null>(null);
+  voiceCookRef.current = voiceCookSession;
+
   const params = route.params;
+
+  const stopPlayback = useCallback(async () => {
+    const s = soundRef.current;
+    soundRef.current = null;
+    if (s) {
+      try {
+        await s.stopAsync();
+        await s.unloadAsync();
+      } catch {
+        /* already unloaded */
+      }
+    }
+  }, []);
+
+  /** ElevenLabs TTS + playback. Native File.write() expects one argument (bytes), not base64 + options. */
+  const speakElevenLabsText = useCallback(
+    async (
+      plainText: string,
+      options: { honorSpeakToggle: boolean }
+    ): Promise<void> => {
+      if (!plainText.trim()) return;
+      if (!elevenLabsCfg.apiKey || !elevenLabsCfg.voiceId) return;
+      if (options.honorSpeakToggle && !speakReplies) return;
+      const { apiKey, voiceId, ttsModel } = elevenLabsCfg;
+      await stopPlayback();
+      setVoiceBusy(true);
+      try {
+        const ab = await synthesizeSpeechToMp3({
+          apiKey,
+          voiceId,
+          text: plainText,
+          modelId: ttsModel,
+        });
+        if (Platform.OS === 'web') {
+          const blob = new Blob([ab], { type: 'audio/mpeg' });
+          const url = URL.createObjectURL(blob);
+          await new Promise<void>((resolve, reject) => {
+            const HtmlAudio = globalThis.Audio;
+            if (typeof HtmlAudio === 'undefined') {
+              throw new Error('Web Audio not available');
+            }
+            const audioEl = new HtmlAudio(url);
+            audioEl.onended = () => {
+              URL.revokeObjectURL(url);
+              resolve();
+            };
+            audioEl.onerror = () => {
+              URL.revokeObjectURL(url);
+              reject(new Error('Playback failed'));
+            };
+            void audioEl.play().catch(reject);
+          });
+        } else {
+          const outfile = new File(Paths.cache, `chef-tts-${Date.now()}.mp3`);
+          outfile.create({ overwrite: true });
+          outfile.write(new Uint8Array(ab));
+          const { sound } = await ExpoAV.Audio.Sound.createAsync(
+            { uri: outfile.uri },
+            { shouldPlay: true }
+          );
+          soundRef.current = sound;
+          await new Promise<void>((resolve) => {
+            sound.setOnPlaybackStatusUpdate((status) => {
+              if (!status.isLoaded) return;
+              if (status.didJustFinish) {
+                sound.setOnPlaybackStatusUpdate(null);
+                void sound
+                  .unloadAsync()
+                  .then(() => resolve())
+                  .catch(() => resolve());
+              }
+            });
+          });
+          soundRef.current = null;
+        }
+      } catch (e) {
+        console.warn('ElevenLabs TTS', e);
+      } finally {
+        setVoiceBusy(false);
+      }
+    },
+    [elevenLabsCfg, speakReplies, stopPlayback]
+  );
+
+  const playAssistantSpeech = useCallback(
+    (plainText: string) =>
+      void speakElevenLabsText(plainText, { honorSpeakToggle: true }),
+    [speakElevenLabsText]
+  );
+
+  const playVoiceGuidance = useCallback(
+    (plainText: string) =>
+      void speakElevenLabsText(plainText, { honorSpeakToggle: false }),
+    [speakElevenLabsText]
+  );
 
   useFocusEffect(
     useCallback(() => {
@@ -148,11 +277,22 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
       requestAnimationFrame(() =>
         listRef.current?.scrollToEnd({ animated: false })
       );
+      return () => {
+        void stopPlayback();
+        setVoiceCookSession(null);
+        const r = recordingRef.current;
+        recordingRef.current = null;
+        if (r) {
+          void r.stopAndUnloadAsync().catch(() => {});
+        }
+        setIsRecording(false);
+      };
     }, [
       params?.recommendedIds,
       params?.explainRecipeId,
       liveModel,
       pantryItems,
+      stopPlayback,
     ])
   );
 
@@ -201,6 +341,7 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
           { id: `a-${Date.now()}`, role: 'assistant', text: assistantText },
         ]);
         setPantryCookRecipe(recipe);
+        void playAssistantSpeech(assistantText);
       } catch (e) {
         const err = e instanceof Error ? e.message : String(e);
         const fallback =
@@ -215,6 +356,7 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
           },
         ]);
         setPantryCookRecipe(recipe);
+        void playAssistantSpeech(fallback);
       } finally {
         setSending(false);
         requestAnimationFrame(() =>
@@ -230,68 +372,316 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
       pickerRecipes,
       messages,
       pantryItems,
+      playAssistantSpeech,
     ]
   );
 
-  const send = useCallback(async () => {
-    const t = input.trim();
-    if (!t || sending) return;
-    setInput('');
-    const userMsg: Msg = {
-      id: `u-${Date.now()}`,
-      role: 'user',
-      text: t,
-    };
-    setMessages((prev) => [...prev, userMsg]);
-    setSending(true);
-    try {
-      let assistantText: string;
-      if (geminiKey) {
-        const systemPrompt = buildChefSystemPrompt(
-          pickerRecipes.map((r) => r.title),
-          pantryItems
+  const submitUserMessage = useCallback(
+    async (rawText: string) => {
+      const t = rawText.trim();
+      if (!t || sending) return;
+      const userMsg: Msg = {
+        id: `u-${Date.now()}`,
+        role: 'user',
+        text: t,
+      };
+      setMessages((prev) => [...prev, userMsg]);
+      setSending(true);
+      try {
+        let assistantText: string;
+        if (geminiKey) {
+          const systemPrompt = buildChefSystemPrompt(
+            pickerRecipes.map((r) => r.title),
+            pantryItems
+          );
+          const history = toChefTurns([...messages, userMsg]);
+          assistantText = await completeChefChat({
+            apiKey: geminiKey,
+            model: geminiModel,
+            systemPrompt,
+            messages: history,
+            apiBaseUrl: geminiBase,
+          });
+        } else {
+          assistantText = getMockChefReply(t, pantryItems);
+        }
+        setMessages((prev) => [
+          ...prev,
+          { id: `a-${Date.now()}`, role: 'assistant', text: assistantText },
+        ]);
+        void playAssistantSpeech(assistantText);
+      } catch (e) {
+        const err = e instanceof Error ? e.message : String(e);
+        const fallback = getMockChefReply(t, pantryItems);
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `a-${Date.now()}`,
+            role: 'assistant',
+            text: `Couldn’t reach the model (${err}). Offline reply:\n\n${fallback}`,
+          },
+        ]);
+        void playAssistantSpeech(fallback);
+      } finally {
+        setSending(false);
+        requestAnimationFrame(() =>
+          listRef.current?.scrollToEnd({ animated: true })
         );
-        const history = toChefTurns([...messages, userMsg]);
-        assistantText = await completeChefChat({
-          apiKey: geminiKey,
-          model: geminiModel,
-          systemPrompt,
-          messages: history,
-          apiBaseUrl: geminiBase,
-        });
-      } else {
-        assistantText = getMockChefReply(t, pantryItems);
       }
-      setMessages((prev) => [
-        ...prev,
-        { id: `a-${Date.now()}`, role: 'assistant', text: assistantText },
+    },
+    [
+      sending,
+      messages,
+      geminiKey,
+      geminiModel,
+      geminiBase,
+      pickerRecipes,
+      pantryItems,
+      playAssistantSpeech,
+    ]
+  );
+
+  const send = useCallback(() => {
+    const t = input.trim();
+    if (!t) return;
+    setInput('');
+    void submitUserMessage(t);
+  }, [input, submitUserMessage]);
+
+  const processVoiceCookInput = useCallback(
+    async (transcript: string) => {
+      const session = voiceCookRef.current;
+      if (!session) return;
+      const recipe = getRecipeById(session.recipeId);
+      const steps = recipe?.steps ?? [];
+      if (!steps.length) {
+        setVoiceCookSession(null);
+        return;
+      }
+
+      const cmd = parseVoiceCookCommand(transcript);
+      let nextSession: VoiceCookSession | null = session;
+      let chatLine = '';
+      const speakLines: string[] = [];
+
+      switch (cmd) {
+        case 'exit':
+          nextSession = null;
+          chatLine = 'Leaving voice cooking mode.';
+          speakLines.push('Okay. Leaving voice cooking mode.');
+          break;
+        case 'repeat': {
+          const i = session.stepIndex;
+          chatLine = `Step ${i + 1}: ${steps[i]}`;
+          speakLines.push(`Step ${i + 1}. ${steps[i]}`);
+          break;
+        }
+        case 'previous': {
+          if (session.stepIndex <= 0) {
+            chatLine = "You're on step 1 — nothing before this.";
+            speakLines.push("You're on the first step.");
+          } else {
+            const pi = session.stepIndex - 1;
+            nextSession = { ...session, stepIndex: pi };
+            chatLine = `Step ${pi + 1}: ${steps[pi]}`;
+            speakLines.push(`Step ${pi + 1}. ${steps[pi]}`);
+          }
+          break;
+        }
+        case 'next': {
+          if (session.stepIndex >= steps.length - 1) {
+            nextSession = null;
+            chatLine = 'All steps complete — enjoy your meal!';
+            speakLines.push('That was the last step. Enjoy your meal.');
+          } else {
+            const ni = session.stepIndex + 1;
+            nextSession = { ...session, stepIndex: ni };
+            chatLine = `Step ${ni + 1}: ${steps[ni]}`;
+            speakLines.push(`Step ${ni + 1}. ${steps[ni]}`);
+          }
+          break;
+        }
+        default:
+          chatLine =
+            'Try: next, back, repeat, or stop cooking (you can say or type them).';
+          speakLines.push('Say next, back, repeat, or stop cooking.');
+      }
+
+      setVoiceCookSession(nextSession);
+      setMessages((p) => [
+        ...p,
+        { id: `vc-${Date.now()}`, role: 'assistant', text: chatLine },
       ]);
-    } catch (e) {
-      const err = e instanceof Error ? e.message : String(e);
-      const fallback = getMockChefReply(t, pantryItems);
-      setMessages((prev) => [
-        ...prev,
+      for (const s of speakLines) {
+        await speakElevenLabsText(s, { honorSpeakToggle: false });
+      }
+    },
+    [speakElevenLabsText]
+  );
+
+  const startVoiceCooking = useCallback(
+    async (recipe: DemoRecipe) => {
+      if (sending || voiceBusy) return;
+      if (!recipe.steps.length) {
+        Alert.alert('No steps', 'This recipe has no steps to walk through.');
+        return;
+      }
+      if (!elevenLabsCfg.apiKey) {
+        Alert.alert('Voice cooking', 'Add EXPO_PUBLIC_ELEVENLABS_API_KEY in .env.');
+        return;
+      }
+      if (!elevenLabsCfg.voiceId) {
+        Alert.alert(
+          'Voice cooking',
+          'Add EXPO_PUBLIC_ELEVENLABS_VOICE_ID so steps can be read aloud.'
+        );
+        return;
+      }
+      await stopPlayback();
+      setVoiceCookSession({ recipeId: recipe.id, stepIndex: 0 });
+      const n = recipe.steps.length;
+      const intro = `Voice cooking — ${recipe.title}. ${n} step${n === 1 ? '' : 's'}. Say “next” when you finish a step, “back” to go back, “repeat” to hear again, or “stop cooking” to exit.`;
+      const step1 = `Step 1: ${recipe.steps[0]}`;
+      setMessages((p) => [
+        ...p,
         {
-          id: `a-${Date.now()}`,
+          id: `vc-start-${Date.now()}`,
           role: 'assistant',
-          text: `Couldn’t reach the model (${err}). Offline reply:\n\n${fallback}`,
+          text: `${intro}\n\n${step1}`,
         },
       ]);
-    } finally {
-      setSending(false);
-      requestAnimationFrame(() =>
-        listRef.current?.scrollToEnd({ animated: true })
+      await speakElevenLabsText(intro, { honorSpeakToggle: false });
+      await speakElevenLabsText(`Step 1. ${recipe.steps[0]}`, {
+        honorSpeakToggle: false,
+      });
+    },
+    [elevenLabsCfg, sending, voiceBusy, speakElevenLabsText, stopPlayback]
+  );
+
+  const exitVoiceCooking = useCallback(() => {
+    setVoiceCookSession(null);
+    void stopPlayback();
+  }, [stopPlayback]);
+
+  const startRecording = useCallback(async () => {
+    if (!canVoiceInput || sending || voiceBusy || isRecording) return;
+    await stopPlayback();
+    const perm = await ExpoAV.Audio.requestPermissionsAsync();
+    if (!perm.granted) {
+      Alert.alert(
+        'Microphone',
+        'Allow mic access to ask the chef while your hands are busy.'
       );
+      return;
+    }
+    await ExpoAV.Audio.setAudioModeAsync({
+      allowsRecordingIOS: true,
+      playsInSilentModeIOS: true,
+      staysActiveInBackground: false,
+      interruptionModeIOS: InterruptionModeIOS.DoNotMix,
+      shouldDuckAndroid: true,
+      interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
+      playThroughEarpieceAndroid: false,
+    });
+    try {
+      const { recording } = await ExpoAV.Audio.Recording.createAsync(
+        ExpoAV.Audio.RecordingOptionsPresets.HIGH_QUALITY
+      );
+      recordingRef.current = recording;
+      setIsRecording(true);
+    } catch (e) {
+      Alert.alert('Recording', e instanceof Error ? e.message : String(e));
+    }
+  }, [canVoiceInput, sending, voiceBusy, isRecording, stopPlayback]);
+
+  const stopRecordingAndSend = useCallback(async () => {
+    const rec = recordingRef.current;
+    recordingRef.current = null;
+    setIsRecording(false);
+    if (!rec) return;
+    const key = elevenLabsCfg.apiKey;
+    if (!key) {
+      Alert.alert('Voice', 'Add your ElevenLabs API key in .env to use voice.');
+      return;
+    }
+    try {
+      await rec.stopAndUnloadAsync();
+    } catch {
+      return;
+    }
+    const uri = rec.getURI();
+    if (!uri) return;
+    const lower = uri.toLowerCase();
+    const ext = lower.includes('.webm')
+      ? 'webm'
+      : lower.includes('.caf')
+        ? 'caf'
+        : lower.includes('.mp4')
+          ? 'mp4'
+          : 'm4a';
+    const mime =
+      ext === 'webm'
+        ? 'audio/webm'
+        : ext === 'caf'
+          ? 'audio/x-caf'
+          : ext === 'mp4'
+            ? 'audio/mp4'
+            : 'audio/m4a';
+    setVoiceBusy(true);
+    try {
+      const text = await transcribeAudioFromUri({
+        apiKey: key,
+        fileUri: uri,
+        filename: `chef-voice.${ext}`,
+        mimeType: mime,
+        modelId: elevenLabsCfg.sttModel,
+      });
+      if (!text.trim()) {
+        Alert.alert(
+          'Didn’t catch that',
+          'Try again a bit closer to the mic, or a quieter spot.'
+        );
+        return;
+      }
+      if (voiceCookRef.current) {
+        setMessages((p) => [
+          ...p,
+          { id: `vu-${Date.now()}`, role: 'user', text },
+        ]);
+        void processVoiceCookInput(text);
+        return;
+      }
+      void submitUserMessage(text);
+    } catch (e) {
+      Alert.alert(
+        'Transcription',
+        e instanceof Error ? e.message : String(e)
+      );
+    } finally {
+      setVoiceBusy(false);
+    }
+  }, [elevenLabsCfg, submitUserMessage, processVoiceCookInput]);
+
+  const onMicPress = useCallback(() => {
+    if (!canVoiceInput) {
+      Alert.alert(
+        'Voice on device',
+        'Hands-free voice works in Expo Go on a phone, not in the web preview.'
+      );
+      return;
+    }
+    if (voiceBusy && !isRecording) return;
+    if (isRecording) {
+      void stopRecordingAndSend();
+    } else {
+      void startRecording();
     }
   }, [
-    input,
-    sending,
-    messages,
-    geminiKey,
-    geminiModel,
-    geminiBase,
-    pickerRecipes,
-    pantryItems,
+    canVoiceInput,
+    voiceBusy,
+    isRecording,
+    startRecording,
+    stopRecordingAndSend,
   ]);
 
   const promptConsumePantry = useCallback(() => {
@@ -327,6 +717,14 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
       ]
     );
   }, [pantryCookRecipe, pantryItems, consumeRecipeIngredients]);
+
+  const voiceCookRecipe = useMemo(
+    () =>
+      voiceCookSession
+        ? getRecipeById(voiceCookSession.recipeId)
+        : undefined,
+    [voiceCookSession]
+  );
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -385,6 +783,31 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
           )}
         />
 
+        {voiceCookSession && voiceCookRecipe ? (
+          <View style={styles.voiceCookBanner}>
+            <View style={styles.voiceCookBannerText}>
+              <Text style={styles.voiceCookKicker}>Voice cooking</Text>
+              <Text style={styles.voiceCookRecipeTitle} numberOfLines={1}>
+                {voiceCookRecipe.title}
+              </Text>
+              <Text style={styles.voiceCookStepLine}>
+                Step {voiceCookSession.stepIndex + 1} of{' '}
+                {voiceCookRecipe.steps.length}
+              </Text>
+              <Text style={styles.voiceCookHint} numberOfLines={2}>
+                Use the mic: say “next”, “back”, “repeat”, or “stop cooking”.
+              </Text>
+            </View>
+            <Pressable
+              style={styles.voiceCookExit}
+              onPress={exitVoiceCooking}
+              hitSlop={8}
+            >
+              <Text style={styles.voiceCookExitText}>Exit</Text>
+            </Pressable>
+          </View>
+        ) : null}
+
         {recipeChips.length > 0 ? (
           <View style={styles.chipSection}>
             <Text style={styles.chipSectionLabel}>Recipes</Text>
@@ -394,20 +817,36 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
               contentContainerStyle={styles.chipScroll}
             >
               {recipeChips.map((r) => (
-                <Pressable
-                  key={r.id}
-                  style={({ pressed }) => [
-                    styles.recipeChip,
-                    pressed && { opacity: 0.88 },
-                  ]}
-                  onPress={() => void appendRecipeExplanation(r)}
-                  disabled={sending}
-                >
-                  <Text style={styles.recipeChipEmoji}>{r.emoji}</Text>
-                  <Text style={styles.recipeChipTitle} numberOfLines={2}>
-                    {r.title}
-                  </Text>
-                </Pressable>
+                <View key={r.id} style={styles.recipeChipWrap}>
+                  <Pressable
+                    style={({ pressed }) => [
+                      styles.recipeChipMain,
+                      pressed && { opacity: 0.88 },
+                    ]}
+                    onPress={() => void appendRecipeExplanation(r)}
+                    disabled={sending}
+                  >
+                    <Text style={styles.recipeChipEmoji}>{r.emoji}</Text>
+                    <Text style={styles.recipeChipTitle} numberOfLines={2}>
+                      {r.title}
+                    </Text>
+                  </Pressable>
+                  <Pressable
+                    style={({ pressed }) => [
+                      styles.startCookingBtn,
+                      (sending || voiceBusy) && { opacity: 0.45 },
+                    ]}
+                    onPress={() => void startVoiceCooking(r)}
+                    disabled={sending || voiceBusy}
+                  >
+                    <Ionicons
+                      name="restaurant"
+                      size={13}
+                      color={colors.terracotta}
+                    />
+                    <Text style={styles.startCookingBtnText}>Start cooking</Text>
+                  </Pressable>
+                </View>
               ))}
             </ScrollView>
           </View>
@@ -436,9 +875,59 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
         ) : null}
 
         <View style={styles.composer}>
+          {canVoiceInput ? (
+            <Pressable
+              style={[
+                styles.micBtn,
+                isRecording && styles.micBtnRecording,
+                (sending || (voiceBusy && !isRecording)) && styles.micBtnDisabled,
+              ]}
+              onPress={onMicPress}
+              disabled={sending || (voiceBusy && !isRecording)}
+              accessibilityLabel={
+                voiceCookSession
+                  ? isRecording
+                    ? 'Stop and send step command'
+                    : 'Record step command'
+                  : isRecording
+                    ? 'Stop recording and send'
+                    : 'Record voice question'
+              }
+            >
+              {voiceBusy && !isRecording ? (
+                <ActivityIndicator color={colors.white} size="small" />
+              ) : (
+                <Ionicons
+                  name={isRecording ? 'stop' : 'mic'}
+                  size={22}
+                  color={colors.white}
+                />
+              )}
+            </Pressable>
+          ) : null}
+          {elevenVoiceReady ? (
+            <Pressable
+              style={styles.speakToggle}
+              onPress={() => setSpeakReplies((v) => !v)}
+              hitSlop={8}
+              accessibilityLabel={
+                speakReplies ? 'Turn off read aloud' : 'Turn on read aloud'
+              }
+            >
+              <Ionicons
+                name={speakReplies ? 'volume-high' : 'volume-mute'}
+                size={22}
+                color={speakReplies ? colors.terracotta : colors.textMuted}
+              />
+            </Pressable>
+          ) : null}
           <TextInput
             style={styles.input}
-            placeholder="e.g. Suggest dinner with what I have…"
+            placeholder={
+              voiceCookSession
+                ? 'Ask anything, or use the mic for next / back / repeat…'
+                : 'e.g. Suggest dinner with what I have…'
+            }
             placeholderTextColor={colors.textMuted}
             value={input}
             onChangeText={setInput}
@@ -450,7 +939,7 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
               styles.sendBtn,
               (!input.trim() || sending) && styles.sendBtnDisabled,
             ]}
-            onPress={() => void send()}
+            onPress={() => send()}
             disabled={!input.trim() || sending}
           >
             {sending ? (
@@ -552,15 +1041,20 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'stretch',
   },
-  recipeChip: {
-    width: 112,
-    minHeight: 72,
+  recipeChipWrap: {
+    width: 124,
+    marginHorizontal: 4,
     borderRadius: radii.md,
     backgroundColor: colors.surface,
     borderWidth: 1,
     borderColor: colors.border,
-    padding: 10,
-    marginHorizontal: 4,
+    overflow: 'hidden',
+  },
+  recipeChipMain: {
+    paddingHorizontal: 10,
+    paddingTop: 10,
+    paddingBottom: 6,
+    minHeight: 68,
   },
   recipeChipEmoji: {
     fontSize: 22,
@@ -571,6 +1065,73 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: colors.text,
     lineHeight: 16,
+  },
+  startCookingBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 4,
+    paddingVertical: 8,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.border,
+    backgroundColor: colors.peach,
+  },
+  startCookingBtnText: {
+    fontFamily: fonts.sansSemi,
+    fontSize: 11,
+    color: colors.terracotta,
+  },
+  voiceCookBanner: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.border,
+    backgroundColor: 'rgba(196, 93, 74, 0.12)',
+    gap: 10,
+  },
+  voiceCookBannerText: {
+    flex: 1,
+    minWidth: 0,
+  },
+  voiceCookKicker: {
+    fontFamily: fonts.sansSemi,
+    fontSize: 10,
+    letterSpacing: 0.8,
+    color: colors.terracotta,
+    marginBottom: 2,
+  },
+  voiceCookRecipeTitle: {
+    fontFamily: fonts.serifSemi,
+    fontSize: 16,
+    color: colors.text,
+  },
+  voiceCookStepLine: {
+    fontFamily: fonts.sansSemi,
+    fontSize: 12,
+    color: colors.textMuted,
+    marginTop: 4,
+  },
+  voiceCookHint: {
+    fontFamily: fonts.sans,
+    fontSize: 11,
+    color: colors.textMuted,
+    marginTop: 6,
+    lineHeight: 15,
+  },
+  voiceCookExit: {
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: radii.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+  },
+  voiceCookExitText: {
+    fontFamily: fonts.sansSemi,
+    fontSize: 13,
+    color: colors.text,
   },
   cookBar: {
     paddingHorizontal: 14,
@@ -612,12 +1173,32 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: colors.white,
   },
+  micBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: colors.chatBar,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  micBtnRecording: {
+    backgroundColor: colors.terracotta,
+  },
+  micBtnDisabled: {
+    opacity: 0.45,
+  },
+  speakToggle: {
+    width: 40,
+    height: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   composer: {
     flexDirection: 'row',
     alignItems: 'flex-end',
     paddingHorizontal: 12,
     paddingVertical: 12,
-    gap: 10,
+    gap: 8,
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: colors.border,
     backgroundColor: colors.background,

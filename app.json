@@ -34,6 +34,12 @@
     "plugins": [
       "expo-font",
       [
+        "expo-av",
+        {
+          "microphonePermission": "Allow the microphone so you can ask the chef hands-free while cooking."
+        }
+      ],
+      [
         "expo-image-picker",
         {
           "photosPermission": "Allow access to photos to add groceries and receipts to your pantry.",

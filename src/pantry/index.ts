@@ -1,3 +1,4 @@
+export { DEFAULT_PANTRY_ITEMS } from './defaultPantry';
 export type {
   PantryCategoryId,
   PantryStockItem,
