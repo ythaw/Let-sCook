@@ -1,3 +1,17 @@
+/**
+ * Removes optional wake phrases (e.g. "Chef, ", "Hey kitchen ") so the rest still maps to commands.
+ * Hands-free hotword listening without tapping the mic is not supported — say codename + command in one recording.
+ */
+export function stripVoiceWakePrefix(raw: string): string {
+  const t = raw.trim();
+  if (!t) return '';
+  const stripped = t.replace(
+    /^\s*(hey\s+)?(chef|kitchen|let'?s\s*cook)\s*[,:]?\s+/i,
+    ''
+  );
+  return stripped.trim();
+}
+
 /** Parsed from ElevenLabs transcript while in step-by-step voice cooking mode. */
 export type VoiceCookCommand =
   | 'next'

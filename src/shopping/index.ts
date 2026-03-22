@@ -16,8 +16,8 @@ export {
   categoryForShoppingLine,
 } from './shoppingListGrouping';
 export { assignShoppingItemCategory } from './shoppingItemCategory';
+export { buildSmartSuggestionsCatalog } from './buildSmartSuggestionsCatalog';
 export {
-  SMART_SUGGESTION_MOCKS,
   type SmartSuggestionMock,
   type SmartSuggestionTag,
 } from './smartSuggestionsMock';

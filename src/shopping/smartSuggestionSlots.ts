@@ -1,8 +1,5 @@
 import { normalizeShoppingItemInput } from './shoppingListInput';
-import {
-  SMART_SUGGESTION_MOCKS,
-  type SmartSuggestionMock,
-} from './smartSuggestionsMock';
+import type { SmartSuggestionMock } from './smartSuggestionsMock';
 
 export const SMART_SUGGESTION_SLOT_COUNT = 3;
 
@@ -12,25 +9,15 @@ export type SmartSlotTuple = [
   string | null,
 ];
 
-const byId = new Map(
-  SMART_SUGGESTION_MOCKS.map((s) => [s.id, s] as const)
-);
-
-export function getSmartSuggestionById(
-  id: string | null
-): SmartSuggestionMock | undefined {
-  if (!id) return undefined;
-  return byId.get(id);
-}
-
 type Scored = { suggestion: SmartSuggestionMock; sourceIndex: number };
 
 function collectEligibleScored(
+  catalog: readonly SmartSuggestionMock[],
   dismissed: ReadonlySet<string>,
   onList: ReadonlySet<string>
 ): Scored[] {
   const out: Scored[] = [];
-  SMART_SUGGESTION_MOCKS.forEach((suggestion, sourceIndex) => {
+  catalog.forEach((suggestion, sourceIndex) => {
     if (dismissed.has(suggestion.id)) return;
     const c = normalizeShoppingItemInput(suggestion.addName);
     if (!c || onList.has(c)) return;
@@ -39,17 +26,25 @@ function collectEligibleScored(
   return out;
 }
 
+export function getSmartSuggestionById(
+  id: string | null,
+  catalog: readonly SmartSuggestionMock[]
+): SmartSuggestionMock | undefined {
+  if (!id) return undefined;
+  return catalog.find((s) => s.id === id);
+}
+
 /**
  * Picks the top three eligible suggestions by `suitabilityScore` (higher first).
- * Ties break on original mock order. After add/pass/list changes, the grid always
- * reflects the next most suitable options globally, not only newly empty slots.
+ * `catalog` should come from `buildSmartSuggestionsCatalog(pantryItems)`.
  */
 export function refillSmartSlots(
+  catalog: readonly SmartSuggestionMock[],
   _slots: SmartSlotTuple,
   dismissed: ReadonlySet<string>,
   onList: ReadonlySet<string>
 ): SmartSlotTuple {
-  const eligible = collectEligibleScored(dismissed, onList);
+  const eligible = collectEligibleScored(catalog, dismissed, onList);
   eligible.sort((a, b) => {
     const d = b.suggestion.suitabilityScore - a.suggestion.suitabilityScore;
     if (d !== 0) return d;

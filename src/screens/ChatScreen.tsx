@@ -38,7 +38,10 @@ import {
   type DemoRecipe,
 } from '../data';
 import type { ChatScreenProps } from '../navigation/types';
-import { parseVoiceCookCommand } from '../chef/voiceCookCommands';
+import {
+  parseVoiceCookCommand,
+  stripVoiceWakePrefix,
+} from '../chef/voiceCookCommands';
 import { usePantryContext } from '../pantry';
 import type { PantryStockItem } from '../pantry/types';
 import { colors, radii } from '../theme/tokens';
@@ -47,6 +50,20 @@ import { fonts } from '../theme/typography';
 type Msg = { id: string; role: 'user' | 'assistant'; text: string };
 
 type VoiceCookSession = { recipeId: string; stepIndex: number };
+
+/** After recording, iOS may keep `allowsRecordingIOS: true` and route TTS to the earpiece — reset before playback. */
+async function applyPlaybackAudioMode(): Promise<void> {
+  if (Platform.OS === 'web') return;
+  await ExpoAV.Audio.setAudioModeAsync({
+    allowsRecordingIOS: false,
+    playsInSilentModeIOS: true,
+    staysActiveInBackground: false,
+    interruptionModeIOS: InterruptionModeIOS.MixWithOthers,
+    shouldDuckAndroid: true,
+    interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
+    playThroughEarpieceAndroid: false,
+  });
+}
 
 const firstName = DEMO_PROFILE.displayName.split(' ')[0] ?? 'there';
 
@@ -183,6 +200,9 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
       if (!elevenLabsCfg.apiKey || !elevenLabsCfg.voiceId) return;
       if (options.honorSpeakToggle && !speakReplies) return;
       const { apiKey, voiceId, ttsModel } = elevenLabsCfg;
+      if (Platform.OS !== 'web') {
+        await applyPlaybackAudioMode();
+      }
       await stopPlayback();
       setVoiceBusy(true);
       try {
@@ -459,7 +479,10 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
         return;
       }
 
-      const cmd = parseVoiceCookCommand(transcript);
+      const forCmd = stripVoiceWakePrefix(transcript);
+      const cmd = parseVoiceCookCommand(
+        forCmd.length > 0 ? forCmd : transcript.trim()
+      );
       let nextSession: VoiceCookSession | null = session;
       let chatLine = '';
       const speakLines: string[] = [];
@@ -540,7 +563,7 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
       await stopPlayback();
       setVoiceCookSession({ recipeId: recipe.id, stepIndex: 0 });
       const n = recipe.steps.length;
-      const intro = `Voice cooking — ${recipe.title}. ${n} step${n === 1 ? '' : 's'}. Say “next” when you finish a step, “back” to go back, “repeat” to hear again, or “stop cooking” to exit.`;
+      const intro = `Voice cooking — ${recipe.title}. ${n} step${n === 1 ? '' : 's'}. Tap the mic and say “next” when you finish a step — or “Chef, next” in one go. You can also say “back”, “repeat”, or “stop cooking” to exit.`;
       const step1 = `Step 1: ${recipe.steps[0]}`;
       setMessages((p) => [
         ...p,
@@ -609,6 +632,7 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
     } catch {
       return;
     }
+    await applyPlaybackAudioMode();
     const uri = rec.getURI();
     if (!uri) return;
     const lower = uri.toLowerCase();
@@ -794,8 +818,9 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
                 Step {voiceCookSession.stepIndex + 1} of{' '}
                 {voiceCookRecipe.steps.length}
               </Text>
-              <Text style={styles.voiceCookHint} numberOfLines={2}>
-                Use the mic: say “next”, “back”, “repeat”, or “stop cooking”.
+              <Text style={styles.voiceCookHint} numberOfLines={3}>
+                Tap the mic, then say “next” or “Chef, next” (same recording).
+                Also: “back”, “repeat”, “stop cooking”.
               </Text>
             </View>
             <Pressable
@@ -925,7 +950,7 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
             style={styles.input}
             placeholder={
               voiceCookSession
-                ? 'Ask anything, or use the mic for next / back / repeat…'
+                ? 'Type or mic: “next”, “Chef, next”, back, repeat…'
                 : 'e.g. Suggest dinner with what I have…'
             }
             placeholderTextColor={colors.textMuted}
