@@ -1,19 +1,21 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useCallback, useRef, useState } from 'react';
+import { useFocusEffect } from '@react-navigation/native';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import {
   FlatList,
   KeyboardAvoidingView,
   Platform,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { getMockChefReply } from '../ai/mockChefAI';
+import { explainRecipeById, getMockChefReply } from '../ai/mockChefAI';
+import { DEMO_PROFILE, getRecipeById, type DemoRecipe } from '../data';
 import type { ChatScreenProps } from '../navigation/types';
-import { DEMO_PROFILE } from '../data';
 import { colors, radii } from '../theme/tokens';
 import { fonts } from '../theme/typography';
 
@@ -21,16 +23,117 @@ type Msg = { id: string; role: 'user' | 'assistant'; text: string };
 
 const firstName = DEMO_PROFILE.displayName.split(' ')[0] ?? 'there';
 
-export function ChatScreen({ navigation }: ChatScreenProps) {
-  const listRef = useRef<FlatList<Msg>>(null);
-  const [input, setInput] = useState('');
-  const [messages, setMessages] = useState<Msg[]>([
+function buildOpeningThread(
+  recommended: DemoRecipe[],
+  explainRecipeId?: string
+): Msg[] {
+  const openedRecipe =
+    explainRecipeId != null ? getRecipeById(explainRecipeId) : undefined;
+  let welcomeText: string;
+  if (recommended.length > 0) {
+    welcomeText = `Hi ${firstName} — I’ve brought in your current “Recommended” list from home (all in pantry). Tap a recipe chip below for a full walkthrough, or type anything.`;
+  } else if (openedRecipe) {
+    welcomeText = `Hi ${firstName} — You opened “${openedRecipe.title}” from home. I’ve started the walkthrough below; use the chips to jump to other recipes when you have matches, or ask anything.`;
+  } else {
+    welcomeText = `Hi ${firstName} — There aren’t any fully-in-pantry matches for the filter you used on home, but you can still ask questions or use recipe chips if any appear.`;
+  }
+
+  const msgs: Msg[] = [
     {
       id: 'welcome',
       role: 'assistant',
-      text: `Hi ${firstName} — I’m your cooking companion (demo). I already know your allergies, cuisines you like, tools, and pantry from your profile. Ask for meal ideas, “what’s expiring?”, or a recipe name for step-by-step help.`,
+      text: `${welcomeText}\n\n(This assistant uses on-device demo logic, not a cloud model.)`,
     },
-  ]);
+  ];
+
+  if (recommended.length > 0) {
+    msgs.push({
+      id: 'recap',
+      role: 'assistant',
+      text:
+        'Right now you can make:\n' +
+        recommended
+          .map(
+            (r) =>
+              `• ${r.title} — ${r.minutes} min · ${r.difficulty} · ~${r.caloriesPerServing} kcal/serving`
+          )
+          .join('\n'),
+    });
+  }
+
+  if (explainRecipeId) {
+    const recipe = getRecipeById(explainRecipeId);
+    if (recipe) {
+      msgs.push({
+        id: 'open-user',
+        role: 'user',
+        text: `Walk me through “${recipe.title}”—ingredients, time, nutrition, and step-by-step.`,
+      });
+      const body = explainRecipeById(explainRecipeId);
+      if (body) {
+        msgs.push({
+          id: 'open-assistant',
+          role: 'assistant',
+          text: body,
+        });
+      }
+    }
+  }
+
+  return msgs;
+}
+
+export function ChatScreen({ navigation, route }: ChatScreenProps) {
+  const listRef = useRef<FlatList<Msg>>(null);
+  const [input, setInput] = useState('');
+  const [messages, setMessages] = useState<Msg[]>([]);
+  const [pickerRecipes, setPickerRecipes] = useState<DemoRecipe[]>([]);
+
+  const params = route.params;
+
+  useFocusEffect(
+    useCallback(() => {
+      const ids = params?.recommendedIds ?? [];
+      const resolved = ids
+        .map((id) => getRecipeById(id))
+        .filter((x): x is DemoRecipe => Boolean(x));
+      setPickerRecipes(resolved);
+      setMessages(buildOpeningThread(resolved, params?.explainRecipeId));
+      requestAnimationFrame(() =>
+        listRef.current?.scrollToEnd({ animated: false })
+      );
+    }, [params?.recommendedIds, params?.explainRecipeId])
+  );
+
+  const recipeChips = useMemo(() => {
+    const m = new Map(pickerRecipes.map((r) => [r.id, r]));
+    const extraId = params?.explainRecipeId;
+    if (extraId) {
+      const ex = getRecipeById(extraId);
+      if (ex) m.set(ex.id, ex);
+    }
+    return [...m.values()];
+  }, [pickerRecipes, params?.explainRecipeId]);
+
+  const appendRecipeExplanation = useCallback((recipe: DemoRecipe) => {
+    const detail = explainRecipeById(recipe.id);
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: `u-${Date.now()}`,
+        role: 'user',
+        text: `Explain “${recipe.title}” in full detail.`,
+      },
+      {
+        id: `a-${Date.now()}`,
+        role: 'assistant',
+        text: detail ?? 'I couldn’t find that recipe.',
+      },
+    ]);
+    requestAnimationFrame(() =>
+      listRef.current?.scrollToEnd({ animated: true })
+    );
+  }, []);
 
   const send = useCallback(() => {
     const t = input.trim();
@@ -47,7 +150,9 @@ export function ChatScreen({ navigation }: ChatScreenProps) {
       text: getMockChefReply(t),
     };
     setMessages((m) => [...m, userMsg, reply]);
-    requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: true }));
+    requestAnimationFrame(() =>
+      listRef.current?.scrollToEnd({ animated: true })
+    );
   }, [input]);
 
   return (
@@ -106,6 +211,33 @@ export function ChatScreen({ navigation }: ChatScreenProps) {
           )}
         />
 
+        {recipeChips.length > 0 ? (
+          <View style={styles.chipSection}>
+            <Text style={styles.chipSectionLabel}>Recipes</Text>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.chipScroll}
+            >
+              {recipeChips.map((r) => (
+                <Pressable
+                  key={r.id}
+                  style={({ pressed }) => [
+                    styles.recipeChip,
+                    pressed && { opacity: 0.88 },
+                  ]}
+                  onPress={() => appendRecipeExplanation(r)}
+                >
+                  <Text style={styles.recipeChipEmoji}>{r.emoji}</Text>
+                  <Text style={styles.recipeChipTitle} numberOfLines={2}>
+                    {r.title}
+                  </Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+          </View>
+        ) : null}
+
         <View style={styles.composer}>
           <TextInput
             style={styles.input}
@@ -163,7 +295,7 @@ const styles = StyleSheet.create({
   },
   listContent: {
     padding: 16,
-    paddingBottom: 24,
+    paddingBottom: 12,
   },
   bubbleRow: {
     alignItems: 'flex-start',
@@ -194,6 +326,47 @@ const styles = StyleSheet.create({
   },
   bubbleTextUser: {
     color: colors.white,
+  },
+  chipSection: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.border,
+    paddingTop: 10,
+    paddingBottom: 6,
+    backgroundColor: colors.background,
+  },
+  chipSectionLabel: {
+    fontFamily: fonts.sansSemi,
+    fontSize: 11,
+    letterSpacing: 0.8,
+    color: colors.textMuted,
+    paddingHorizontal: 16,
+    marginBottom: 8,
+  },
+  chipScroll: {
+    paddingHorizontal: 12,
+    gap: 10,
+    flexDirection: 'row',
+    alignItems: 'stretch',
+  },
+  recipeChip: {
+    width: 112,
+    minHeight: 72,
+    borderRadius: radii.md,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 10,
+    marginHorizontal: 4,
+  },
+  recipeChipEmoji: {
+    fontSize: 22,
+    marginBottom: 4,
+  },
+  recipeChipTitle: {
+    fontFamily: fonts.sansSemi,
+    fontSize: 12,
+    color: colors.text,
+    lineHeight: 16,
   },
   composer: {
     flexDirection: 'row',

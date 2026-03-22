@@ -40,7 +40,7 @@ function allergyConflict(
   return null;
 }
 
-function formatRecipePlan(recipe: DemoRecipe, profile: UserProfile): string {
+export function formatRecipePlan(recipe: DemoRecipe, profile: UserProfile): string {
   const warn = allergyConflict(recipe, profile);
   const ing = recipe.ingredients.map((x) => `• ${x.amount} ${x.name}`).join('\n');
   const steps = recipe.steps.map((s, i) => `${i + 1}. ${s}`).join('\n');
@@ -81,6 +81,12 @@ function pickSuggestion(recipes: DemoRecipe[], profile: UserProfile): DemoRecipe
   );
   const pool = preferred.length ? preferred : recipes;
   return pool[0] ?? recipes[0];
+}
+
+export function explainRecipeById(recipeId: string): string | null {
+  const recipe = DEMO_RECIPES.find((r) => r.id === recipeId);
+  if (!recipe) return null;
+  return formatRecipePlan(recipe, DEMO_PROFILE);
 }
 
 /**

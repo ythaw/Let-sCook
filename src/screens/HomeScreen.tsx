@@ -12,7 +12,7 @@ import {
   SafeAreaView,
   useSafeAreaInsets,
 } from 'react-native-safe-area-context';
-import type { HomeScreenProps } from '../navigation/types';
+import type { ChatScreenParams, HomeScreenProps } from '../navigation/types';
 import { colors, radii } from '../theme/tokens';
 import { fonts } from '../theme/typography';
 import {
@@ -37,6 +37,16 @@ function greetingLabel(): string {
   if (h < 12) return 'GOOD MORNING';
   if (h < 17) return 'GOOD AFTERNOON';
   return 'GOOD EVENING';
+}
+
+function chatParams(
+  recommendedIds: string[],
+  explainRecipeId?: string
+): ChatScreenParams {
+  return {
+    recommendedIds,
+    ...(explainRecipeId ? { explainRecipeId } : {}),
+  };
 }
 
 export function HomeScreen({ navigation }: HomeScreenProps) {
@@ -74,7 +84,12 @@ export function HomeScreen({ navigation }: HomeScreenProps) {
             styles.chatBar,
             pressed && { opacity: 0.92 },
           ]}
-          onPress={() => navigation.navigate('Chat')}
+          onPress={() =>
+            navigation.navigate(
+              'Chat',
+              chatParams(recommended.map((r) => r.id))
+            )
+          }
         >
           <View style={styles.chatDot} />
           <Text style={styles.chatPlaceholder} numberOfLines={1}>
@@ -122,7 +137,12 @@ export function HomeScreen({ navigation }: HomeScreenProps) {
             <Pressable
               key={r.id}
               style={[styles.recCard, { width: cardW }]}
-              onPress={() => navigation.navigate('Chat')}
+              onPress={() =>
+                navigation.navigate(
+                  'Chat',
+                  chatParams(recommended.map((x) => x.id), r.id)
+                )
+              }
             >
               <View style={styles.recImage}>
                 <Text style={styles.recEmoji}>{r.emoji}</Text>
@@ -150,22 +170,32 @@ export function HomeScreen({ navigation }: HomeScreenProps) {
 
         {almost.map((r) => (
           <View key={r.id} style={styles.almostCard}>
-            <View style={styles.almostThumb}>
-              <Text style={styles.thumbEmoji}>{r.emoji}</Text>
-            </View>
-            <View style={styles.almostBody}>
-              <Text style={styles.almostTitle}>{r.title}</Text>
-              <Text style={styles.almostMeta}>
-                {r.minutes} min · {r.difficulty}
-              </Text>
-              <View style={styles.tagRow}>
-                {r.missingFromPantry.map((m) => (
-                  <View key={m} style={styles.tag}>
-                    <Text style={styles.tagText}>+ {m}</Text>
-                  </View>
-                ))}
+            <Pressable
+              style={styles.almostMain}
+              onPress={() =>
+                navigation.navigate(
+                  'Chat',
+                  chatParams(recommended.map((x) => x.id), r.id)
+                )
+              }
+            >
+              <View style={styles.almostThumb}>
+                <Text style={styles.thumbEmoji}>{r.emoji}</Text>
               </View>
-            </View>
+              <View style={styles.almostBody}>
+                <Text style={styles.almostTitle}>{r.title}</Text>
+                <Text style={styles.almostMeta}>
+                  {r.minutes} min · {r.difficulty}
+                </Text>
+                <View style={styles.tagRow}>
+                  {r.missingFromPantry.map((m) => (
+                    <View key={m} style={styles.tag}>
+                      <Text style={styles.tagText}>+ {m}</Text>
+                    </View>
+                  ))}
+                </View>
+              </View>
+            </Pressable>
             <Pressable style={styles.addBtn}>
               <Ionicons name="add" size={22} color={colors.white} />
             </Pressable>
@@ -385,10 +415,19 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     backgroundColor: colors.surface,
     borderRadius: radii.md,
-    padding: 12,
+    paddingVertical: 12,
+    paddingLeft: 12,
+    paddingRight: 8,
     borderWidth: 1,
     borderColor: colors.border,
+    gap: 8,
+  },
+  almostMain: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
     gap: 12,
+    minWidth: 0,
   },
   almostThumb: {
     width: 72,
