@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "Let-sCook",
-    "slug": "Let-sCook",
+    "slug": "lets-cook",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -28,6 +28,12 @@
     },
     "plugins": [
       "expo-font"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "dc9a149b-73dd-471c-be2e-52d8406d58ba"
+      }
+    },
+    "owner": "yin_thaw"
   }
 }
