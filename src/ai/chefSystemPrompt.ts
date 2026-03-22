@@ -1,10 +1,23 @@
-import { DEMO_PANTRY, DEMO_PROFILE, DEMO_RECIPES } from '../data';
+import {
+  computeRecipeMissingFromPantry,
+  DEMO_PROFILE,
+  DEMO_RECIPES,
+} from '../data';
+import type { PantryStockItem } from '../pantry/types';
 
-export function buildChefSystemPrompt(homeRecommendedTitles: string[]): string {
-  const pantryLine = DEMO_PANTRY.map(
-    (i) =>
-      `${i.name} (${i.quantity})${i.expiresAt ? `, use by ${i.expiresAt}` : ''}${i.perishable ? ', perishable' : ''}`
-  ).join('; ');
+export function buildChefSystemPrompt(
+  homeRecommendedTitles: string[],
+  pantryItems: PantryStockItem[]
+): string {
+  const pantryLine =
+    pantryItems.length > 0
+      ? pantryItems
+          .map(
+            (i) =>
+              `${i.name} ×${i.quantity}${i.unitLabel ? ` (${i.unitLabel})` : ''} [${i.category}]`
+          )
+          .join('; ')
+      : '(Pantry is empty in the app — suggest adding staples or ask the user to update pantry.)';
 
   const recipesPayload = DEMO_RECIPES.map((r) => ({
     id: r.id,
@@ -16,7 +29,7 @@ export function buildChefSystemPrompt(homeRecommendedTitles: string[]): string {
     servings: r.servings,
     mealTypes: r.mealTypes,
     ingredients: r.ingredients,
-    missingFromPantry: r.missingFromPantry,
+    missingFromPantry: computeRecipeMissingFromPantry(r, pantryItems),
     steps: r.steps,
     allergenHints: r.allergenHints ?? [],
   }));
@@ -40,7 +53,7 @@ ${highlight}
 
 Guidelines:
 - Honor allergies and dietaryNotes; warn when a recipe’s allergenHints conflict.
-- Suggest meals that fit pantry + profile; mention missing items for "almost there" recipes.
+- Suggest meals that fit the live PANTRY list + profile; use each recipe’s missingFromPantry (computed vs that list) for “almost there” honesty.
 - When giving steps, use the recipe’s steps as a base but you may clarify for the user’s tools and household size.
 - Include time, servings, and calories from recipe data when relevant.
 - Stay concise unless the user asks for detail.`;

@@ -3,6 +3,7 @@ import { useFocusEffect } from '@react-navigation/native';
 import { useCallback, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   FlatList,
   KeyboardAvoidingView,
   Platform,
@@ -18,8 +19,16 @@ import { buildChefSystemPrompt } from '../ai/chefSystemPrompt';
 import { explainRecipeById, getMockChefReply } from '../ai/mockChefAI';
 import type { ChefChatTurn } from '../ai/chefChatTypes';
 import { completeChefChat, readGeminiConfigFromEnv } from '../ai/geminiChef';
-import { DEMO_PROFILE, getRecipeById, type DemoRecipe } from '../data';
+import {
+  DEMO_PROFILE,
+  getRecipeById,
+  previewRecipeConsumption,
+  type ConsumptionPreviewLine,
+  type DemoRecipe,
+} from '../data';
 import type { ChatScreenProps } from '../navigation/types';
+import { usePantryContext } from '../pantry';
+import type { PantryStockItem } from '../pantry/types';
 import { colors, radii } from '../theme/tokens';
 import { fonts } from '../theme/typography';
 
@@ -37,7 +46,8 @@ function toChefTurns(msgs: Msg[]): ChefChatTurn[] {
 function buildOpeningThread(
   recommended: DemoRecipe[],
   explainRecipeId: string | undefined,
-  liveModel: boolean
+  liveModel: boolean,
+  pantryItems: PantryStockItem[]
 ): Msg[] {
   const openedRecipe =
     explainRecipeId != null ? getRecipeById(explainRecipeId) : undefined;
@@ -85,7 +95,7 @@ function buildOpeningThread(
         role: 'user',
         text: `Walk me through “${recipe.title}”—ingredients, time, nutrition, and step-by-step.`,
       });
-      const body = explainRecipeById(explainRecipeId);
+      const body = explainRecipeById(explainRecipeId, pantryItems);
       if (body) {
         msgs.push({
           id: 'open-assistant',
@@ -105,6 +115,10 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [pickerRecipes, setPickerRecipes] = useState<DemoRecipe[]>([]);
   const [sending, setSending] = useState(false);
+  const [pantryCookRecipe, setPantryCookRecipe] = useState<DemoRecipe | null>(
+    null
+  );
+  const { items: pantryItems, consumeRecipeIngredients } = usePantryContext();
 
   const { apiKey: geminiKey, model: geminiModel, apiBaseUrl: geminiBase } =
     useMemo(() => readGeminiConfigFromEnv(), []);
@@ -120,12 +134,26 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
         .filter((x): x is DemoRecipe => Boolean(x));
       setPickerRecipes(resolved);
       setMessages(
-        buildOpeningThread(resolved, params?.explainRecipeId, liveModel)
+        buildOpeningThread(
+          resolved,
+          params?.explainRecipeId,
+          liveModel,
+          pantryItems
+        )
       );
+      const opened = params?.explainRecipeId
+        ? getRecipeById(params.explainRecipeId)
+        : undefined;
+      setPantryCookRecipe(opened ?? null);
       requestAnimationFrame(() =>
         listRef.current?.scrollToEnd({ animated: false })
       );
-    }, [params?.recommendedIds, params?.explainRecipeId, liveModel])
+    }, [
+      params?.recommendedIds,
+      params?.explainRecipeId,
+      liveModel,
+      pantryItems,
+    ])
   );
 
   const recipeChips = useMemo(() => {
@@ -152,7 +180,8 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
         let assistantText: string;
         if (geminiKey) {
           const systemPrompt = buildChefSystemPrompt(
-            pickerRecipes.map((r) => r.title)
+            pickerRecipes.map((r) => r.title),
+            pantryItems
           );
           const history = toChefTurns([...messages, userMsg]);
           assistantText = await completeChefChat({
@@ -164,16 +193,19 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
           });
         } else {
           assistantText =
-            explainRecipeById(recipe.id) ?? 'I couldn’t find that recipe.';
+            explainRecipeById(recipe.id, pantryItems) ??
+            'I couldn’t find that recipe.';
         }
         setMessages((prev) => [
           ...prev,
           { id: `a-${Date.now()}`, role: 'assistant', text: assistantText },
         ]);
+        setPantryCookRecipe(recipe);
       } catch (e) {
         const err = e instanceof Error ? e.message : String(e);
         const fallback =
-          explainRecipeById(recipe.id) ?? 'I couldn’t find that recipe.';
+          explainRecipeById(recipe.id, pantryItems) ??
+          'I couldn’t find that recipe.';
         setMessages((prev) => [
           ...prev,
           {
@@ -182,6 +214,7 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
             text: `Couldn’t reach the model (${err}). Offline version:\n\n${fallback}`,
           },
         ]);
+        setPantryCookRecipe(recipe);
       } finally {
         setSending(false);
         requestAnimationFrame(() =>
@@ -196,6 +229,7 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
       geminiBase,
       pickerRecipes,
       messages,
+      pantryItems,
     ]
   );
 
@@ -214,7 +248,8 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
       let assistantText: string;
       if (geminiKey) {
         const systemPrompt = buildChefSystemPrompt(
-          pickerRecipes.map((r) => r.title)
+          pickerRecipes.map((r) => r.title),
+          pantryItems
         );
         const history = toChefTurns([...messages, userMsg]);
         assistantText = await completeChefChat({
@@ -225,7 +260,7 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
           apiBaseUrl: geminiBase,
         });
       } else {
-        assistantText = getMockChefReply(t);
+        assistantText = getMockChefReply(t, pantryItems);
       }
       setMessages((prev) => [
         ...prev,
@@ -233,7 +268,7 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
       ]);
     } catch (e) {
       const err = e instanceof Error ? e.message : String(e);
-      const fallback = getMockChefReply(t);
+      const fallback = getMockChefReply(t, pantryItems);
       setMessages((prev) => [
         ...prev,
         {
@@ -256,7 +291,42 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
     geminiModel,
     geminiBase,
     pickerRecipes,
+    pantryItems,
   ]);
+
+  const promptConsumePantry = useCallback(() => {
+    if (!pantryCookRecipe) return;
+    const preview = previewRecipeConsumption(pantryCookRecipe, pantryItems);
+    if (preview.length === 0) {
+      Alert.alert(
+        'No pantry matches',
+        'None of this recipe’s ingredients matched your pantry by name. Add or rename items if you want automatic subtraction.'
+      );
+      return;
+    }
+    const lines = preview
+      .map(
+        (l: ConsumptionPreviewLine) =>
+          `• ${l.pantryItemName}: ${l.before} → ${l.after}${
+            l.removesItem ? ' (remove row)' : ''
+          }`
+      )
+      .join('\n');
+    Alert.alert(
+      'Update pantry after cooking?',
+      `This subtracts 1 from each matched pantry item (best effort). Unmatched recipe lines are skipped.\n\n${lines}`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Apply',
+          onPress: () => {
+            consumeRecipeIngredients(pantryCookRecipe);
+            setPantryCookRecipe(null);
+          },
+        },
+      ]
+    );
+  }, [pantryCookRecipe, pantryItems, consumeRecipeIngredients]);
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -282,6 +352,7 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
 
         <FlatList
           ref={listRef}
+          style={styles.flex}
           data={messages}
           keyExtractor={(item) => item.id}
           contentContainerStyle={styles.listContent}
@@ -339,6 +410,28 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
                 </Pressable>
               ))}
             </ScrollView>
+          </View>
+        ) : null}
+
+        {pantryCookRecipe ? (
+          <View style={styles.cookBar}>
+            <Text style={styles.cookBarText} numberOfLines={2}>
+              Cooked “{pantryCookRecipe.title}”? Subtract matched pantry items.
+            </Text>
+            <View style={styles.cookBarActions}>
+              <Pressable
+                style={styles.cookBarDismiss}
+                onPress={() => setPantryCookRecipe(null)}
+              >
+                <Text style={styles.cookBarDismissText}>Not now</Text>
+              </Pressable>
+              <Pressable
+                style={styles.cookBarPrimary}
+                onPress={promptConsumePantry}
+              >
+                <Text style={styles.cookBarPrimaryText}>Review & update</Text>
+              </Pressable>
+            </View>
           </View>
         ) : null}
 
@@ -478,6 +571,46 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: colors.text,
     lineHeight: 16,
+  },
+  cookBar: {
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.border,
+    backgroundColor: colors.peach,
+  },
+  cookBarText: {
+    fontFamily: fonts.sans,
+    fontSize: 13,
+    color: colors.text,
+    lineHeight: 18,
+    marginBottom: 10,
+  },
+  cookBarActions: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 10,
+    alignItems: 'center',
+  },
+  cookBarDismiss: {
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+  },
+  cookBarDismissText: {
+    fontFamily: fonts.sansSemi,
+    fontSize: 14,
+    color: colors.textMuted,
+  },
+  cookBarPrimary: {
+    backgroundColor: colors.terracotta,
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderRadius: radii.md,
+  },
+  cookBarPrimaryText: {
+    fontFamily: fonts.sansSemi,
+    fontSize: 14,
+    color: colors.white,
   },
   composer: {
     flexDirection: 'row',
