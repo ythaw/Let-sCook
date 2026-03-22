@@ -17,6 +17,7 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { MainTabNavigator } from './src/navigation/MainTabNavigator';
 import type { RootStackParamList } from './src/navigation/types';
 import { ChatScreen } from './src/screens/ChatScreen';
+import { ProfilePreferencesProvider } from './src/profile';
 import { PantryProvider } from './src/pantry';
 import { colors } from './src/theme/tokens';
 
@@ -55,18 +56,20 @@ export default function App() {
   return (
     <SafeAreaProvider>
       <PantryProvider>
-        <NavigationContainer>
-          <StatusBar style="dark" />
-          <Stack.Navigator
-            screenOptions={{
-              headerShown: false,
-              contentStyle: { backgroundColor: colors.background },
-            }}
-          >
-            <Stack.Screen name="MainTabs" component={MainTabNavigator} />
-            <Stack.Screen name="Chat" component={ChatScreen} />
-          </Stack.Navigator>
-        </NavigationContainer>
+        <ProfilePreferencesProvider>
+          <NavigationContainer>
+            <StatusBar style="dark" />
+            <Stack.Navigator
+              screenOptions={{
+                headerShown: false,
+                contentStyle: { backgroundColor: colors.background },
+              }}
+            >
+              <Stack.Screen name="MainTabs" component={MainTabNavigator} />
+              <Stack.Screen name="Chat" component={ChatScreen} />
+            </Stack.Navigator>
+          </NavigationContainer>
+        </ProfilePreferencesProvider>
       </PantryProvider>
     </SafeAreaProvider>
   );

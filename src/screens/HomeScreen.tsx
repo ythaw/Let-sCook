@@ -10,6 +10,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import type { ChatScreenParams, HomeScreenProps } from '../navigation/types';
+import { initialsFromDisplayName, usePersistedProfilePreferences } from '../profile';
 import { colors, radii } from '../theme/tokens';
 import { fonts } from '../theme/typography';
 import {
@@ -50,9 +51,15 @@ function chatParams(
 
 export function HomeScreen({ navigation }: HomeScreenProps) {
   const { width } = useWindowDimensions();
+  const { displayName } = usePersistedProfilePreferences();
   const cardW = Math.min(width * 0.58, 220);
   const [meal, setMeal] = useState<MealFilter>('all');
   const { items: pantryItems } = usePantryContext();
+
+  const headerInitials = useMemo(
+    () => initialsFromDisplayName(displayName),
+    [displayName]
+  );
 
   const base = useMemo(
     () => filterRecipesByMeal(DEMO_RECIPES, meal),
@@ -79,9 +86,21 @@ export function HomeScreen({ navigation }: HomeScreenProps) {
             <Text style={styles.kicker}>{greetingLabel()}</Text>
             <Text style={styles.title}>What to cook? 🌸</Text>
           </View>
-          <View style={styles.avatar}>
-            <Text style={styles.avatarText}>{DEMO_PROFILE.initials}</Text>
-          </View>
+          <Pressable
+            onPress={() => navigation.navigate('Profile')}
+            style={({ pressed }) => [
+              styles.avatarButton,
+              pressed && { opacity: 0.88 },
+            ]}
+            accessibilityRole="button"
+            accessibilityLabel="Profile"
+            accessibilityHint="Opens your profile and preferences"
+            hitSlop={8}
+          >
+            <View style={styles.avatar}>
+              <Text style={styles.avatarText}>{headerInitials}</Text>
+            </View>
+          </Pressable>
         </View>
 
         <Pressable
@@ -242,18 +261,25 @@ const styles = StyleSheet.create({
     color: colors.text,
     lineHeight: 34,
   },
+  /** Matches Profile tab avatar (scaled for header). */
+  avatarButton: {
+    borderRadius: 24,
+  },
   avatar: {
     width: 44,
     height: 44,
     borderRadius: 22,
-    backgroundColor: colors.peachDeep,
+    backgroundColor: colors.peach,
+    borderWidth: 2,
+    borderColor: colors.surface,
     alignItems: 'center',
     justifyContent: 'center',
   },
   avatarText: {
-    fontFamily: fonts.sansSemi,
-    fontSize: 14,
-    color: colors.text,
+    fontFamily: fonts.serifSemi,
+    fontSize: 15,
+    letterSpacing: 0.6,
+    color: colors.terracotta,
   },
   chatBar: {
     marginHorizontal: 22,
