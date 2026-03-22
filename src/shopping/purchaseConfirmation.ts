@@ -1,4 +1,4 @@
-import type { IngredientCategory } from '../data';
+import type { PantryCategoryId } from '../pantry/types';
 
 /** Where the line came from; optional on stored rows for backward compatibility. */
 export type ShoppingListItemSource =
@@ -21,7 +21,8 @@ export type ShoppingListLine = {
   id: string;
   /** Canonical name (trimmed, lowercase). */
   name: string;
-  category: IngredientCategory;
+  /** Same taxonomy as Pantry (`PANTRY_CATEGORY_ORDER`). */
+  category: PantryCategoryId;
   /** In shopping mode: user marks items as picked. */
   bought: boolean;
 } & ShoppingListLineMeta;

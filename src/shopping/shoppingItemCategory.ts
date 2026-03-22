@@ -1,13 +1,9 @@
-import type { IngredientCategory } from '../data';
-import { ingredientCategory } from '../data';
+import type { PantryCategoryId } from '../pantry/types';
+import { classifyIngredientCategory } from '../pantry/pantryItems';
 
 /**
- * Category for a shopping-line ingredient from its display or raw name.
- * Uses shared keyword lists in `src/data/ingredientCategory.ts` (extend those arrays to tune behavior).
- *
- * - Produce / protein checked first; then pantry keywords; else **Pantry**.
+ * Category for a shopping line — matches Pantry’s `classifyIngredientCategory`.
  */
-export function assignShoppingItemCategory(ingredientName: string): IngredientCategory {
-  const normalized = ingredientName.trim().toLowerCase();
-  return ingredientCategory(normalized);
+export function assignShoppingItemCategory(ingredientName: string): PantryCategoryId {
+  return classifyIngredientCategory(ingredientName);
 }

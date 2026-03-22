@@ -1,6 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import type { IngredientCategory } from '../data';
-import { INGREDIENT_CATEGORY_ORDER } from '../data';
+import type { PantryCategoryId } from '../pantry/types';
+import { PANTRY_CATEGORY_ORDER } from '../pantry/types';
 import type {
   ShoppingListItemSource,
   ShoppingListLine,
@@ -8,9 +8,24 @@ import type {
 import { assignShoppingItemCategory } from './shoppingItemCategory';
 import { normalizeShoppingItemInput } from './shoppingListInput';
 
-export const SHOPPING_LIST_STORAGE_KEY = '@LetsCook/shoppingList/v1';
+/** Bumped so new installs (and this update) start with an empty list; v1 data is left unused. */
+export const SHOPPING_LIST_STORAGE_KEY = '@LetsCook/shoppingList/v2';
 
-const CATEGORY_SET = new Set<string>(INGREDIENT_CATEGORY_ORDER);
+const CATEGORY_SET = new Set<string>(PANTRY_CATEGORY_ORDER);
+
+/** Legacy shopping categories before Pantry alignment. */
+function migrateLegacyCategory(
+  raw: unknown,
+  name: string
+): PantryCategoryId {
+  if (typeof raw === 'string' && CATEGORY_SET.has(raw)) {
+    return raw as PantryCategoryId;
+  }
+  if (raw === 'produce') return 'produce';
+  if (raw === 'protein') return 'meat_seafood';
+  if (raw === 'pantry') return 'dry_goods';
+  return assignShoppingItemCategory(name);
+}
 
 const SOURCE_VALUES = new Set<ShoppingListItemSource>([
   'manual',
@@ -41,10 +56,7 @@ function parseStoredLine(raw: unknown): ShoppingListLine | null {
   if (!name) return null;
   const bought = o.bought === true;
   const cat = o.category;
-  const category: IngredientCategory =
-    typeof cat === 'string' && CATEGORY_SET.has(cat)
-      ? (cat as IngredientCategory)
-      : assignShoppingItemCategory(name);
+  const category: PantryCategoryId = migrateLegacyCategory(cat, name);
   const source = parseOptionalSource(o.source);
   const recipeName = parseOptionalRecipeName(o.recipeName);
   const line: ShoppingListLine = { id: o.id, name, category, bought };

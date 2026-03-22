@@ -11,14 +11,16 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
-import {
-  INGREDIENT_CATEGORY_LABELS,
-  INGREDIENT_CATEGORY_ORDER,
-  type IngredientCategory,
-} from '../data';
 import type { ShoppingListScreenProps } from '../navigation/types';
 import { usePantryContext } from '../pantry';
+import { classifyIngredientCategory } from '../pantry/pantryItems';
 import {
+  PANTRY_CATEGORY_ORDER,
+  PANTRY_SECTION_LABEL,
+  type PantryCategoryId,
+} from '../pantry/types';
+import {
+  buildSmartSuggestionsCatalog,
   formatShoppingItemDisplay,
   getSmartSuggestionById,
   groupShoppingLinesByCategory,
@@ -37,14 +39,20 @@ type ShoppingListMode = 'planning' | 'shopping';
 export function ShoppingListScreen(_props: ShoppingListScreenProps) {
   const insets = useSafeAreaInsets();
   const [mode, setMode] = useState<ShoppingListMode>('planning');
-  const { addMultipleIngredients } = usePantryContext();
+  const { importParsedItems, items: pantryItems } = usePantryContext();
 
   const handoffPurchasesToPantry = useCallback(
     async (canonicalNames: string[]) => {
-      addMultipleIngredients(canonicalNames);
+      importParsedItems(
+        canonicalNames.map((name) => ({
+          name,
+          category: classifyIngredientCategory(name),
+          quantity: 1,
+        }))
+      );
       return { ok: true as const };
     },
-    [addMultipleIngredients]
+    [importParsedItems]
   );
 
   const {
@@ -70,12 +78,20 @@ export function ShoppingListScreen(_props: ShoppingListScreenProps) {
     null,
   ]);
   const [categoryOpen, setCategoryOpen] = useState<
-    Record<IngredientCategory, boolean>
+    Record<PantryCategoryId, boolean>
   >({
     produce: true,
-    protein: false,
-    pantry: false,
+    dairy: false,
+    meat_seafood: false,
+    dry_goods: false,
+    spices: false,
+    frozen: false,
   });
+
+  const smartCatalog = useMemo(
+    () => buildSmartSuggestionsCatalog(pantryItems),
+    [pantryItems]
+  );
 
   const canSubmitAdd = useMemo(
     () => normalizeShoppingItemInput(draft) !== null,
@@ -134,17 +150,19 @@ export function ShoppingListScreen(_props: ShoppingListScreenProps) {
     if (!smartPanelOpen || mode !== 'planning') return;
     const onList = new Set(items.map((r) => r.name));
     const dismissed = new Set(dismissedSuggestionIds);
-    setSlotIds((prev) => refillSmartSlots(prev, dismissed, onList));
-  }, [smartPanelOpen, mode, items, dismissedSuggestionIds]);
+    setSlotIds((prev) =>
+      refillSmartSlots(smartCatalog, prev, dismissed, onList)
+    );
+  }, [smartPanelOpen, mode, items, dismissedSuggestionIds, smartCatalog]);
 
   const onAddFromSuggestionSlot = useCallback(
     (slotIndex: number) => {
       const id = slotIds[slotIndex];
-      const s = getSmartSuggestionById(id);
+      const s = getSmartSuggestionById(id, smartCatalog);
       if (!s) return;
       addShoppingItem(s.addName, { source: 'suggestion' });
     },
-    [slotIds, addShoppingItem]
+    [slotIds, addShoppingItem, smartCatalog]
   );
 
   const onPassSuggestion = useCallback((suggestionId: string) => {
@@ -153,7 +171,7 @@ export function ShoppingListScreen(_props: ShoppingListScreenProps) {
     );
   }, []);
 
-  const toggleCategory = useCallback((cat: IngredientCategory) => {
+  const toggleCategory = useCallback((cat: PantryCategoryId) => {
     setCategoryOpen((p) => ({ ...p, [cat]: !p[cat] }));
   }, []);
 
@@ -389,7 +407,7 @@ export function ShoppingListScreen(_props: ShoppingListScreenProps) {
                   { length: SMART_SUGGESTION_SLOT_COUNT },
                   (_, slotIndex) => {
                     const id = slotIds[slotIndex];
-                    const s = getSmartSuggestionById(id);
+                    const s = getSmartSuggestionById(id, smartCatalog);
                     return (
                       <View
                         key={`smart-slot-${slotIndex}`}
@@ -462,8 +480,9 @@ export function ShoppingListScreen(_props: ShoppingListScreenProps) {
                   }
                 )}
                 <Text style={styles.recipesBlurb}>
-                  From your recipes: items tagged with a recipe name tie to meals
-                  on your plan. Deeper recipe integration is coming soon.
+                  Suggestions use your Pantry tab and the app&apos;s recipe list:
+                  “recipe” picks finish meals you&apos;re almost ready to cook;
+                  other picks are staples that unlock more dishes.
                 </Text>
               </View>
             ) : null}
@@ -496,7 +515,7 @@ export function ShoppingListScreen(_props: ShoppingListScreenProps) {
             </View>
           ) : mode === 'planning' ? (
             <View style={styles.sectionsWrap}>
-              {INGREDIENT_CATEGORY_ORDER.map((cat) => {
+              {PANTRY_CATEGORY_ORDER.map((cat) => {
                 const sectionRows = grouped[cat];
                 if (sectionRows.length === 0) return null;
                 const open = categoryOpen[cat] ?? true;
@@ -512,7 +531,7 @@ export function ShoppingListScreen(_props: ShoppingListScreenProps) {
                       accessibilityState={{ expanded: open }}
                     >
                       <Text style={styles.categoryHeaderLabel}>
-                        {INGREDIENT_CATEGORY_LABELS[cat].toUpperCase()}
+                        {PANTRY_SECTION_LABEL[cat]}
                       </Text>
                       <Ionicons
                         name={open ? 'chevron-down' : 'chevron-forward'}
@@ -559,7 +578,7 @@ export function ShoppingListScreen(_props: ShoppingListScreenProps) {
             </View>
           ) : (
             <View style={styles.shoppingSectionsWrap}>
-              {INGREDIENT_CATEGORY_ORDER.map((cat) => {
+              {PANTRY_CATEGORY_ORDER.map((cat) => {
                 const sectionRows = grouped[cat];
                 if (sectionRows.length === 0) return null;
                 const open = categoryOpen[cat] ?? true;
@@ -575,7 +594,7 @@ export function ShoppingListScreen(_props: ShoppingListScreenProps) {
                       accessibilityState={{ expanded: open }}
                     >
                       <Text style={styles.categoryHeaderLabel}>
-                        {INGREDIENT_CATEGORY_LABELS[cat].toUpperCase()}
+                        {PANTRY_SECTION_LABEL[cat]}
                       </Text>
                       <Ionicons
                         name={open ? 'chevron-down' : 'chevron-forward'}
