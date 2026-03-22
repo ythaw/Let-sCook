@@ -1,10 +1,12 @@
 import { Ionicons } from '@expo/vector-icons';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
+import { StyleSheet } from 'react-native';
 import { HomeScreen } from '../screens/HomeScreen';
 import { PantryScreen } from '../screens/PantryScreen';
 import { ProfileScreen } from '../screens/ProfileScreen';
 import { ShoppingListScreen } from '../screens/ShoppingListScreen';
 import { colors } from '../theme/tokens';
+import { fonts } from '../theme/typography';
 import type { MainTabParamList } from './types';
 
 const Tab = createBottomTabNavigator<MainTabParamList>();
@@ -18,10 +20,14 @@ export function MainTabNavigator() {
         tabBarInactiveTintColor: colors.textMuted,
         tabBarStyle: {
           backgroundColor: colors.background,
+          borderTopWidth: StyleSheet.hairlineWidth,
           borderTopColor: colors.border,
+          elevation: 0,
+          shadowOpacity: 0,
         },
         tabBarLabelStyle: {
           fontSize: 11,
+          fontFamily: fonts.sansSemi,
         },
       }}
     >
