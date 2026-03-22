@@ -1,7 +1,10 @@
 import { Ionicons } from '@expo/vector-icons';
+import * as ImagePicker from 'expo-image-picker';
 import { useCallback, useMemo, useState } from 'react';
 import {
-  KeyboardAvoidingView,
+  ActivityIndicator,
+  Alert,
+  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -10,228 +13,726 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import {
+  SafeAreaView,
+  useSafeAreaInsets,
+} from 'react-native-safe-area-context';
+import { analyzePantryImage } from '../ai/geminiPantryImage';
+import { readGeminiConfigFromEnv } from '../ai/geminiChef';
 import type { PantryScreenProps } from '../navigation/types';
-import { usePantryContext } from '../pantry';
+import {
+  PANTRY_CATEGORY_LABELS,
+  PANTRY_CATEGORY_ORDER,
+  PANTRY_SECTION_LABEL,
+  usePantryContext,
+  type PantryCategoryId,
+  type PantryStockItem,
+} from '../pantry';
+import type { ParsedPantryImport } from '../pantry/usePantry';
 import { colors, radii } from '../theme/tokens';
 import { fonts } from '../theme/typography';
 
-type PantryCategory = 'produce' | 'protein' | 'pantry';
+type FilterChip = 'all' | PantryCategoryId;
 
-const CATEGORY_ORDER: PantryCategory[] = ['produce', 'protein', 'pantry'];
+/** Distance above tab bar; keep FAB clear of nav but close to it. */
+const TAB_BAR_CLEARANCE = 52;
 
-const CATEGORY_LABELS: Record<PantryCategory, string> = {
-  produce: 'Produce',
-  protein: 'Protein',
-  pantry: 'Pantry',
+type ImportDraftRow = {
+  key: string;
+  name: string;
+  category: PantryCategoryId;
+  quantity: number;
+  unit: string;
 };
 
-/** Rough keyword buckets for demo — first match wins (produce → protein → pantry). */
-function ingredientCategory(name: string): PantryCategory {
+function makeEmptyGrouped(): Record<PantryCategoryId, PantryStockItem[]> {
+  return PANTRY_CATEGORY_ORDER.reduce(
+    (acc, c) => {
+      acc[c] = [];
+      return acc;
+    },
+    {} as Record<PantryCategoryId, PantryStockItem[]>
+  );
+}
+
+function parsedToDrafts(rows: ParsedPantryImport[]): ImportDraftRow[] {
+  return rows.map((r, i) => ({
+    key: `ai-${Date.now()}-${i}`,
+    name: r.name,
+    category: r.category,
+    quantity: Math.max(1, r.quantity),
+    unit: r.unit ?? '',
+  }));
+}
+
+function itemEmoji(name: string): string {
   const n = name.toLowerCase();
-
-  const produceHints = [
-    'lettuce',
-    'spinach',
-    'kale',
-    'arugula',
-    'onion',
-    'garlic',
-    'tomato',
-    'carrot',
-    'potato',
-    'pepper',
-    'celery',
-    'cucumber',
-    'broccoli',
-    'cauliflower',
-    'zucchini',
-    'squash',
-    'mushroom',
-    'corn',
-    'apple',
-    'banana',
-    'orange',
-    'lemon',
-    'lime',
-    'berry',
-    'avocado',
-    'cilantro',
-    'parsley',
-    'basil',
-    'mint',
-    'scallion',
-    'green onion',
-    'asparagus',
-    'cabbage',
-    'chard',
-    'herb',
-    'ginger',
+  const map: [string, string][] = [
+    ['broccoli', '🥦'],
+    ['onion', '🧅'],
+    ['garlic', '🧄'],
+    ['tomato', '🍅'],
+    ['carrot', '🥕'],
+    ['potato', '🥔'],
+    ['mushroom', '🍄'],
+    ['corn', '🌽'],
+    ['apple', '🍎'],
+    ['banana', '🍌'],
+    ['lemon', '🍋'],
+    ['egg', '🥚'],
+    ['milk', '🥛'],
+    ['cheese', '🧀'],
+    ['bread', '🍞'],
+    ['rice', '🍚'],
+    ['pasta', '🍝'],
+    ['chicken', '🍗'],
+    ['fish', '🐟'],
+    ['butter', '🧈'],
   ];
-
-  const proteinHints = [
-    'chicken',
-    'beef',
-    'pork',
-    'turkey',
-    'lamb',
-    'duck',
-    'steak',
-    'bacon',
-    'sausage',
-    'salmon',
-    'tuna',
-    'fish',
-    'shrimp',
-    'prawn',
-    'cod',
-    'tilapia',
-    'egg',
-    'tofu',
-    'tempeh',
-    'yogurt',
-    'cheese',
-    'milk',
-    'ricotta',
-    'mozzarella',
-    'feta',
-    'paneer',
-  ];
-
-  if (produceHints.some((kw) => n.includes(kw))) return 'produce';
-  if (proteinHints.some((kw) => n.includes(kw))) return 'protein';
-  return 'pantry';
+  for (const [k, e] of map) {
+    if (n.includes(k)) return e;
+  }
+  return '🛒';
 }
 
-type GroupedEntry = { name: string; index: number };
+export function PantryScreen(_props: PantryScreenProps) {
+  const insets = useSafeAreaInsets();
+  const {
+    items,
+    addItem,
+    adjustQuantity,
+    importParsedItems,
+  } = usePantryContext();
 
-function groupByCategory(items: string[]): Record<PantryCategory, GroupedEntry[]> {
-  const buckets: Record<PantryCategory, GroupedEntry[]> = {
-    produce: [],
-    protein: [],
-    pantry: [],
-  };
-  items.forEach((name, index) => {
-    const cat = ingredientCategory(name);
-    buckets[cat].push({ name, index });
-  });
-  return buckets;
-}
+  const geminiCfg = useMemo(() => readGeminiConfigFromEnv(), []);
 
-export function PantryScreen({ navigation }: PantryScreenProps) {
-  const { items, addIngredient, removeIngredientAt } = usePantryContext();
-  const [draft, setDraft] = useState('');
+  const [search, setSearch] = useState('');
+  const [chip, setChip] = useState<FilterChip>('all');
+  const [lowStockOnly, setLowStockOnly] = useState(false);
 
-  const submitDraft = useCallback(() => {
-    if (addIngredient(draft)) setDraft('');
-  }, [addIngredient, draft]);
+  const [addOpen, setAddOpen] = useState(false);
+  const [lockedCategory, setLockedCategory] = useState<PantryCategoryId | null>(
+    null
+  );
+  const [draftName, setDraftName] = useState('');
+  const [draftCategory, setDraftCategory] =
+    useState<PantryCategoryId>('produce');
+  const [draftQty, setDraftQty] = useState(1);
+  const [draftUnit, setDraftUnit] = useState('');
 
-  const grouped = useMemo(() => groupByCategory(items), [items]);
+  const [aiBusy, setAiBusy] = useState(false);
+  const [importDrafts, setImportDrafts] = useState<ImportDraftRow[] | null>(
+    null
+  );
+
+  const openAddModal = useCallback((lock: PantryCategoryId | null) => {
+    setLockedCategory(lock);
+    setDraftCategory(lock ?? 'produce');
+    setDraftName('');
+    setDraftQty(1);
+    setDraftUnit('');
+    setAddOpen(true);
+  }, []);
+
+  const submitManualAdd = useCallback(() => {
+    const name = draftName.trim();
+    if (!name) {
+      Alert.alert('Name required', 'Enter an item name.');
+      return;
+    }
+    const cat = lockedCategory ?? draftCategory;
+    addItem({
+      name,
+      category: cat,
+      quantity: Math.max(1, draftQty),
+      unitLabel: draftUnit.trim() || undefined,
+    });
+    setAddOpen(false);
+  }, [addItem, draftCategory, draftName, draftQty, draftUnit, lockedCategory]);
+
+  const visibleItems = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return items.filter((it) => {
+      if (q && !it.name.toLowerCase().includes(q)) return false;
+      if (chip !== 'all' && it.category !== chip) return false;
+      if (lowStockOnly && it.quantity > it.lowStockAt) return false;
+      return true;
+    });
+  }, [items, search, chip, lowStockOnly]);
+
+  const grouped = useMemo(() => {
+    const m = makeEmptyGrouped();
+    for (const it of visibleItems) {
+      m[it.category].push(it);
+    }
+    return m;
+  }, [visibleItems]);
+
+  const showCategoryBlock = useCallback(
+    (cat: PantryCategoryId) => chip === 'all' || chip === cat,
+    [chip]
+  );
+
+  const launchAiImport = useCallback(
+    async (source: 'camera' | 'library') => {
+      if (!geminiCfg.apiKey) {
+        Alert.alert(
+          'API key missing',
+          'Add EXPO_PUBLIC_GEMINI_API_KEY (or GOOGLE_AI_API_KEY) to your .env file.'
+        );
+        return;
+      }
+
+      try {
+        if (source === 'camera') {
+          const cam = await ImagePicker.requestCameraPermissionsAsync();
+          if (!cam.granted) {
+            Alert.alert('Permission', 'Camera access is needed to take a photo.');
+            return;
+          }
+        } else {
+          const lib = await ImagePicker.requestMediaLibraryPermissionsAsync();
+          if (!lib.granted) {
+            Alert.alert(
+              'Permission',
+              'Photo library access is needed to pick an image.'
+            );
+            return;
+          }
+        }
+
+        const picker =
+          source === 'camera'
+            ? ImagePicker.launchCameraAsync({
+                mediaTypes: ['images'],
+                quality: 0.85,
+                base64: true,
+              })
+            : ImagePicker.launchImageLibraryAsync({
+                mediaTypes: ['images'],
+                quality: 0.85,
+                base64: true,
+              });
+
+        const result = await picker;
+        if (result.canceled || !result.assets[0]) return;
+        const asset = result.assets[0];
+        const b64 = asset.base64;
+        if (!b64) {
+          Alert.alert('Error', 'Could not read image data. Try another photo.');
+          return;
+        }
+
+        setAiBusy(true);
+        const rows = await analyzePantryImage({
+          apiKey: geminiCfg.apiKey,
+          model: geminiCfg.model,
+          apiBaseUrl: geminiCfg.apiBaseUrl,
+          base64: b64,
+          mimeType: asset.mimeType ?? 'image/jpeg',
+        });
+        setAiBusy(false);
+        if (rows.length === 0) {
+          Alert.alert(
+            'Nothing detected',
+            'No food items were found. Try a clearer photo or a receipt.'
+          );
+          return;
+        }
+        setImportDrafts(parsedToDrafts(rows));
+      } catch (e) {
+        setAiBusy(false);
+        const msg = e instanceof Error ? e.message : String(e);
+        Alert.alert('Could not analyze image', msg);
+      }
+    },
+    [geminiCfg]
+  );
+
+  const updateImportDraft = useCallback(
+    (key: string, patch: Partial<Omit<ImportDraftRow, 'key'>>) => {
+      setImportDrafts((prev) =>
+        prev
+          ? prev.map((r) => (r.key === key ? { ...r, ...patch } : r))
+          : null
+      );
+    },
+    []
+  );
+
+  const removeImportDraft = useCallback((key: string) => {
+    setImportDrafts((prev) =>
+      prev ? prev.filter((r) => r.key !== key) : null
+    );
+  }, []);
+
+  const addBlankImportDraft = useCallback(() => {
+    setImportDrafts((prev) => [
+      ...(prev ?? []),
+      {
+        key: `new-${Date.now()}`,
+        name: '',
+        category: 'produce',
+        quantity: 1,
+        unit: '',
+      },
+    ]);
+  }, []);
+
+  const confirmImportDrafts = useCallback(() => {
+    if (!importDrafts?.length) return;
+    const rows: ParsedPantryImport[] = importDrafts
+      .map((d) => ({
+        name: d.name.trim(),
+        category: d.category,
+        quantity: Math.max(1, Math.floor(d.quantity) || 1),
+        unit: d.unit.trim() || undefined,
+      }))
+      .filter((r) => r.name.length > 0);
+    if (rows.length === 0) {
+      Alert.alert('Nothing to add', 'Enter at least one item name.');
+      return;
+    }
+    const { added, merged } = importParsedItems(rows);
+    setImportDrafts(null);
+    Alert.alert(
+      'Pantry updated',
+      `Added ${added} new item(s), merged ${merged} with matching names.`
+    );
+  }, [importDrafts, importParsedItems]);
+
+  const onFabPress = useCallback(() => {
+    if (aiBusy) return;
+    const buttons: {
+      text: string;
+      onPress?: () => void;
+      style?: 'cancel' | 'destructive' | 'default';
+    }[] = [
+      {
+        text: 'Photo library',
+        onPress: () => void launchAiImport('library'),
+      },
+    ];
+    if (Platform.OS !== 'web') {
+      buttons.unshift({
+        text: 'Take photo',
+        onPress: () => void launchAiImport('camera'),
+      });
+    }
+    buttons.push({ text: 'Cancel', style: 'cancel' });
+    Alert.alert(
+      'Add from photo',
+      'Take a picture or choose one from your library. We’ll read groceries or a receipt and let you confirm before adding.',
+      buttons
+    );
+  }, [aiBusy, launchAiImport]);
+
+  const fabBottom = insets.bottom + TAB_BAR_CLEARANCE;
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
-      <KeyboardAvoidingView
-        style={styles.flex}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      >
-        <View style={styles.topBar}>
-          {navigation.canGoBack() ? (
+      <View style={styles.column}>
+        <View style={styles.topSection}>
+        <View style={styles.header}>
+          <Text style={styles.title}>My Pantry</Text>
+          <View style={styles.headerActions}>
             <Pressable
-              onPress={() => navigation.goBack()}
-              style={({ pressed }) => [
-                styles.iconBtn,
-                pressed && { opacity: 0.75 },
-              ]}
-              hitSlop={12}
+              style={({ pressed }) => [styles.roundBtn, pressed && { opacity: 0.85 }]}
+              onPress={() => openAddModal(null)}
             >
-              <Ionicons name="chevron-back" size={26} color={colors.text} />
+              <Ionicons name="add" size={24} color={colors.text} />
             </Pressable>
-          ) : (
-            <View style={styles.iconBtn} />
-          )}
-          <Text style={styles.screenTitle}>My Pantry</Text>
-          <View style={styles.topBarSpacer} />
+            <Pressable
+              style={({ pressed }) => [styles.roundBtn, pressed && { opacity: 0.85 }]}
+              onPress={() => setLowStockOnly((v) => !v)}
+            >
+              <Ionicons
+                name="options-outline"
+                size={22}
+                color={lowStockOnly ? colors.terracotta : colors.text}
+              />
+            </Pressable>
+          </View>
         </View>
 
-        <View style={styles.addRow}>
+        <View style={styles.searchWrap}>
+          <Ionicons name="search" size={20} color={colors.textMuted} />
           <TextInput
-            value={draft}
-            onChangeText={setDraft}
-            placeholder="e.g. olive oil, garlic…"
+            style={styles.searchInput}
+            placeholder="Search pantry items…"
             placeholderTextColor={colors.textMuted}
-            style={styles.input}
-            returnKeyType="done"
-            onSubmitEditing={submitDraft}
+            value={search}
+            onChangeText={setSearch}
           />
-          <Pressable
-            onPress={submitDraft}
-            style={({ pressed }) => [
-              styles.addBtn,
-              pressed && { opacity: 0.92 },
-            ]}
-          >
-            <Text style={styles.addBtnLabel}>Add</Text>
-          </Pressable>
         </View>
 
-        {items.length > 0 ? (
-          <Text style={styles.hint}>
-            {items.length} ingredient{items.length === 1 ? '' : 's'} saved
-          </Text>
+        <View style={styles.chipBar}>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            nestedScrollEnabled
+            contentContainerStyle={styles.chipScroll}
+          >
+            <Pressable
+              style={[styles.filterChip, chip === 'all' && styles.filterChipOn]}
+              onPress={() => setChip('all')}
+            >
+              <Text
+                style={[
+                  styles.filterChipText,
+                  chip === 'all' && styles.filterChipTextOn,
+                ]}
+              >
+                All
+              </Text>
+            </Pressable>
+            {PANTRY_CATEGORY_ORDER.map((c) => (
+              <Pressable
+                key={c}
+                style={[styles.filterChip, chip === c && styles.filterChipOn]}
+                onPress={() => setChip(c)}
+              >
+                <Text
+                  style={[
+                    styles.filterChipText,
+                    chip === c && styles.filterChipTextOn,
+                  ]}
+                >
+                  {PANTRY_CATEGORY_LABELS[c]}
+                </Text>
+              </Pressable>
+            ))}
+          </ScrollView>
+        </View>
+
+        {lowStockOnly ? (
+          <Text style={styles.filterHint}>Showing low-stock items only</Text>
         ) : null}
+        </View>
 
         <ScrollView
           style={styles.list}
           contentContainerStyle={[
             styles.listContent,
-            items.length === 0 && styles.listContentEmpty,
+            { paddingBottom: fabBottom + 130 },
           ]}
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
         >
           {items.length === 0 ? (
-            <Text style={styles.emptyMessage}>No ingredients yet</Text>
-          ) : (
-            <View style={styles.groupedWrap}>
-              {CATEGORY_ORDER.map((cat) => {
-                const entries = grouped[cat];
-                if (entries.length === 0) return null;
-                return (
-                  <View key={cat} style={styles.categoryBlock}>
-                    <Text style={styles.categoryTitle}>
-                      {CATEGORY_LABELS[cat]}
-                    </Text>
-                    <View style={styles.chipsWrap}>
-                      {entries.map(({ name, index }) => (
-                        <View key={`${index}-${name}`} style={styles.chip}>
-                          <Text style={styles.chipLabel} numberOfLines={1}>
-                            {name}
-                          </Text>
-                          <Pressable
-                            onPress={() => removeIngredientAt(index)}
-                            style={({ pressed }) => [
-                              styles.chipRemove,
-                              pressed && { opacity: 0.7 },
-                            ]}
-                            hitSlop={8}
-                            accessibilityLabel={`Remove ${name}`}
-                          >
-                            <Ionicons
-                              name="close"
-                              size={16}
-                              color={colors.textMuted}
-                            />
-                          </Pressable>
-                        </View>
-                      ))}
+            <Text style={styles.empty}>
+              Tap + or a dashed row to add items, or use the AI button for a
+              photo or receipt.
+            </Text>
+          ) : null}
+
+          {PANTRY_CATEGORY_ORDER.map((cat) => {
+            if (!showCategoryBlock(cat)) return null;
+            const list = grouped[cat];
+            const label = PANTRY_SECTION_LABEL[cat];
+            return (
+              <View key={cat} style={styles.section}>
+                <Text style={styles.sectionTitle}>
+                  {label}{' '}
+                  <Text style={styles.sectionCount}>
+                    {list.length} {list.length === 1 ? 'ITEM' : 'ITEMS'}
+                  </Text>
+                </Text>
+
+                {list.map((it) => {
+                  const low = it.quantity <= it.lowStockAt;
+                  const subParts: string[] = [];
+                  if (it.unitLabel) subParts.push(it.unitLabel);
+                  if (low) subParts.push('Low stock');
+                  const subtitle =
+                    subParts.join(' · ') ||
+                    `${it.quantity} on hand`;
+
+                  return (
+                    <View key={it.id} style={styles.itemCard}>
+                      <Text style={styles.itemEmoji}>{itemEmoji(it.name)}</Text>
+                      <View style={styles.itemBody}>
+                        <Text style={styles.itemName}>{it.name}</Text>
+                        <Text
+                          style={[styles.itemSub, low && styles.itemSubWarn]}
+                          numberOfLines={2}
+                        >
+                          {subtitle}
+                        </Text>
+                      </View>
+                      <View style={styles.stepper}>
+                        <Pressable
+                          style={styles.stepBtn}
+                          onPress={() => adjustQuantity(it.id, -1)}
+                          hitSlop={8}
+                        >
+                          <Text style={styles.stepBtnText}>−</Text>
+                        </Pressable>
+                        <Text style={styles.stepQty}>{it.quantity}</Text>
+                        <Pressable
+                          style={styles.stepBtn}
+                          onPress={() => adjustQuantity(it.id, 1)}
+                          hitSlop={8}
+                        >
+                          <Text style={styles.stepBtnText}>+</Text>
+                        </Pressable>
+                      </View>
                     </View>
-                  </View>
-                );
-              })}
-            </View>
-          )}
+                  );
+                })}
+
+                <Pressable
+                  style={styles.addDashed}
+                  onPress={() => openAddModal(cat)}
+                >
+                  <Text style={styles.addDashedText}>
+                    + Add {PANTRY_CATEGORY_LABELS[cat].toLowerCase()} manually
+                  </Text>
+                </Pressable>
+              </View>
+            );
+          })}
         </ScrollView>
-      </KeyboardAvoidingView>
+
+        <View
+          style={[styles.fabWrap, { bottom: fabBottom }]}
+          pointerEvents="box-none"
+        >
+          <View style={styles.fabTooltip}>
+            <Text style={styles.fabTooltipText}>
+              Add items from a photo or receipt.
+            </Text>
+          </View>
+          <Pressable
+            style={({ pressed }) => [
+              styles.fab,
+              pressed && { opacity: 0.9 },
+              aiBusy && { opacity: 0.6 },
+            ]}
+            onPress={onFabPress}
+            disabled={aiBusy}
+          >
+            {aiBusy ? (
+              <ActivityIndicator color={colors.white} />
+            ) : (
+              <Ionicons name="camera" size={28} color={colors.white} />
+            )}
+          </Pressable>
+        </View>
+      </View>
+
+      <Modal
+        visible={importDrafts != null}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setImportDrafts(null)}
+      >
+        <View style={styles.modalOverlay}>
+          <Pressable
+            style={styles.modalDismiss}
+            onPress={() => setImportDrafts(null)}
+          />
+          <View style={[styles.modalSheet, styles.importSheet]}>
+            <Text style={styles.modalTitle}>Review detected items</Text>
+            <Text style={styles.importSub}>
+              Edit names, categories, and amounts before adding to your pantry.
+            </Text>
+            <ScrollView
+              style={styles.importScroll}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+            >
+              {(importDrafts ?? []).map((row) => (
+                <View key={row.key} style={styles.importRow}>
+                  <View style={styles.importRowTop}>
+                    <TextInput
+                      style={[styles.modalInput, styles.importNameInput]}
+                      placeholder="Item name"
+                      placeholderTextColor={colors.textMuted}
+                      value={row.name}
+                      onChangeText={(t) => updateImportDraft(row.key, { name: t })}
+                    />
+                    <Pressable
+                      style={styles.importRemove}
+                      onPress={() => removeImportDraft(row.key)}
+                      hitSlop={8}
+                    >
+                      <Ionicons name="trash-outline" size={20} color={colors.textMuted} />
+                    </Pressable>
+                  </View>
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={styles.importCatRow}
+                  >
+                    {PANTRY_CATEGORY_ORDER.map((c) => (
+                      <Pressable
+                        key={c}
+                        style={[
+                          styles.importCatChip,
+                          row.category === c && styles.importCatChipOn,
+                        ]}
+                        onPress={() =>
+                          updateImportDraft(row.key, { category: c })
+                        }
+                      >
+                        <Text
+                          style={[
+                            styles.importCatChipText,
+                            row.category === c && styles.importCatChipTextOn,
+                          ]}
+                          numberOfLines={1}
+                        >
+                          {PANTRY_CATEGORY_LABELS[c]}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </ScrollView>
+                  <View style={styles.importQtyRow}>
+                    <Text style={styles.importMiniLabel}>Qty</Text>
+                    <View style={styles.importStepper}>
+                      <Pressable
+                        style={styles.importStepBtn}
+                        onPress={() =>
+                          updateImportDraft(row.key, {
+                            quantity: Math.max(1, row.quantity - 1),
+                          })
+                        }
+                      >
+                        <Text style={styles.stepBtnText}>−</Text>
+                      </Pressable>
+                      <Text style={styles.importQtyNum}>{row.quantity}</Text>
+                      <Pressable
+                        style={styles.importStepBtn}
+                        onPress={() =>
+                          updateImportDraft(row.key, {
+                            quantity: row.quantity + 1,
+                          })
+                        }
+                      >
+                        <Text style={styles.stepBtnText}>+</Text>
+                      </Pressable>
+                    </View>
+                    <Text style={styles.importMiniLabel}>Unit</Text>
+                    <TextInput
+                      style={[styles.modalInput, styles.importUnitInput]}
+                      placeholder="optional"
+                      placeholderTextColor={colors.textMuted}
+                      value={row.unit}
+                      onChangeText={(t) =>
+                        updateImportDraft(row.key, { unit: t })
+                      }
+                    />
+                  </View>
+                </View>
+              ))}
+            </ScrollView>
+            <Pressable style={styles.importAddRow} onPress={addBlankImportDraft}>
+              <Text style={styles.importAddRowText}>+ Add row</Text>
+            </Pressable>
+            <Pressable style={styles.modalPrimary} onPress={confirmImportDrafts}>
+              <Text style={styles.modalPrimaryText}>Add to pantry</Text>
+            </Pressable>
+            <Pressable
+              style={styles.modalCancel}
+              onPress={() => setImportDrafts(null)}
+            >
+              <Text style={styles.modalCancelText}>Cancel</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={addOpen} animationType="slide" transparent>
+        <View style={styles.modalOverlay}>
+          <Pressable
+            style={styles.modalDismiss}
+            onPress={() => setAddOpen(false)}
+          />
+          <View style={styles.modalSheet}>
+            <Text style={styles.modalTitle}>
+              {lockedCategory
+                ? `Add to ${PANTRY_CATEGORY_LABELS[lockedCategory]}`
+                : 'Add pantry item'}
+            </Text>
+            <Text style={styles.modalLabel}>Name</Text>
+            <TextInput
+              style={styles.modalInput}
+              placeholder="e.g. Broccoli"
+              placeholderTextColor={colors.textMuted}
+              value={draftName}
+              onChangeText={setDraftName}
+            />
+
+            {lockedCategory == null ? (
+              <>
+                <Text style={styles.modalLabel}>Category</Text>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.modalChipRow}
+                >
+                  {PANTRY_CATEGORY_ORDER.map((c) => (
+                    <Pressable
+                      key={c}
+                      style={[
+                        styles.modalCatChip,
+                        draftCategory === c && styles.modalCatChipOn,
+                      ]}
+                      onPress={() => setDraftCategory(c)}
+                    >
+                      <Text
+                        style={[
+                          styles.modalCatChipText,
+                          draftCategory === c && styles.modalCatChipTextOn,
+                        ]}
+                      >
+                        {PANTRY_CATEGORY_LABELS[c]}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </ScrollView>
+              </>
+            ) : null}
+
+            <Text style={styles.modalLabel}>Quantity</Text>
+            <View style={styles.modalStepper}>
+              <Pressable
+                style={styles.modalStepBtn}
+                onPress={() => setDraftQty((q) => Math.max(1, q - 1))}
+              >
+                <Text style={styles.stepBtnText}>−</Text>
+              </Pressable>
+              <Text style={styles.modalQtyNum}>{draftQty}</Text>
+              <Pressable
+                style={styles.modalStepBtn}
+                onPress={() => setDraftQty((q) => q + 1)}
+              >
+                <Text style={styles.stepBtnText}>+</Text>
+              </Pressable>
+            </View>
+
+            <Text style={styles.modalLabel}>Unit (optional)</Text>
+            <TextInput
+              style={styles.modalInput}
+              placeholder="e.g. 1 head, 500 g"
+              placeholderTextColor={colors.textMuted}
+              value={draftUnit}
+              onChangeText={setDraftUnit}
+            />
+
+            <Pressable style={styles.modalPrimary} onPress={submitManualAdd}>
+              <Text style={styles.modalPrimaryText}>Add to pantry</Text>
+            </Pressable>
+            <Pressable
+              style={styles.modalCancel}
+              onPress={() => setAddOpen(false)}
+            >
+              <Text style={styles.modalCancelText}>Cancel</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -241,134 +742,448 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: colors.background,
   },
-  flex: {
+  column: {
     flex: 1,
   },
-  topBar: {
+  topSection: {
+    flexShrink: 0,
+  },
+  /** No maxHeight: native horizontal ScrollView clips cross-axis overflow, which hid chip labels. */
+  chipBar: {
+    flexGrow: 0,
+  },
+  flex: { flex: 1 },
+  header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 14,
-    paddingVertical: 8,
+    paddingHorizontal: 22,
+    paddingTop: 4,
+    paddingBottom: 12,
   },
-  iconBtn: {
-    width: 40,
-    height: 40,
+  title: {
+    fontFamily: fonts.serifBold,
+    fontSize: 26,
+    color: colors.text,
+  },
+  headerActions: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  roundBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  topBarSpacer: {
-    width: 40,
-  },
-  screenTitle: {
-    fontFamily: fonts.serifBold,
-    fontSize: 22,
-    color: colors.text,
-  },
-  addRow: {
+  searchWrap: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
-    paddingHorizontal: 22,
-    marginTop: 8,
+    gap: 10,
+    marginHorizontal: 22,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: radii.lg,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
   },
-  input: {
+  searchInput: {
     flex: 1,
-    minHeight: 52,
-    paddingHorizontal: 18,
-    paddingVertical: 14,
-    borderRadius: radii.md,
+    fontFamily: fonts.sans,
+    fontSize: 16,
+    color: colors.text,
+    padding: 0,
+  },
+  chipScroll: {
+    paddingHorizontal: 22,
+    paddingVertical: 8,
+    gap: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  filterChip: {
+    paddingHorizontal: 16,
+    paddingVertical: 9,
+    borderRadius: radii.pill,
     borderWidth: 1,
     borderColor: colors.border,
     backgroundColor: colors.surface,
-    fontFamily: fonts.sans,
-    fontSize: 16,
+    marginRight: 8,
+  },
+  filterChipOn: {
+    backgroundColor: colors.terracotta,
+    borderColor: colors.terracotta,
+  },
+  filterChipText: {
+    fontFamily: fonts.sansSemi,
+    fontSize: 13,
     color: colors.text,
   },
-  addBtn: {
-    paddingHorizontal: 22,
-    minHeight: 52,
-    justifyContent: 'center',
-    borderRadius: radii.md,
-    backgroundColor: colors.terracotta,
-  },
-  addBtnLabel: {
-    fontFamily: fonts.sansSemi,
-    fontSize: 16,
+  filterChipTextOn: {
     color: colors.white,
   },
-  hint: {
-    marginTop: 16,
+  filterHint: {
     paddingHorizontal: 22,
+    paddingBottom: 4,
+    fontFamily: fonts.sansSemi,
+    fontSize: 12,
+    color: colors.terracotta,
+  },
+  importSheet: {
+    maxHeight: '88%',
+  },
+  importSub: {
     fontFamily: fonts.sans,
     fontSize: 14,
     color: colors.textMuted,
+    marginBottom: 12,
     lineHeight: 20,
   },
-  list: {
+  importScroll: {
+    maxHeight: 340,
+    marginBottom: 8,
+  },
+  importRow: {
+    marginBottom: 16,
+    paddingBottom: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  importRowTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 8,
+  },
+  importNameInput: {
     flex: 1,
-    marginTop: 14,
+    marginBottom: 0,
   },
-  listContent: {
-    paddingHorizontal: 22,
-    paddingBottom: 24,
+  importRemove: {
+    padding: 8,
   },
-  listContentEmpty: {
-    flexGrow: 1,
+  importCatRow: {
+    flexDirection: 'row',
+    gap: 6,
+    paddingVertical: 4,
+    marginBottom: 8,
+  },
+  importCatChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: radii.pill,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+    marginRight: 6,
+    maxWidth: 140,
+  },
+  importCatChipOn: {
+    backgroundColor: colors.terracotta,
+    borderColor: colors.terracotta,
+  },
+  importCatChipText: {
+    fontFamily: fonts.sansSemi,
+    fontSize: 11,
+    color: colors.text,
+  },
+  importCatChipTextOn: {
+    color: colors.white,
+  },
+  importQtyRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  importMiniLabel: {
+    fontFamily: fonts.sansSemi,
+    fontSize: 11,
+    color: colors.textMuted,
+  },
+  importStepper: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  importStepBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: colors.peach,
+    alignItems: 'center',
     justifyContent: 'center',
-    paddingTop: 8,
-    paddingBottom: 80,
   },
-  emptyMessage: {
+  importQtyNum: {
+    minWidth: 28,
     textAlign: 'center',
     fontFamily: fonts.sansSemi,
     fontSize: 16,
+    color: colors.text,
+  },
+  importUnitInput: {
+    flex: 1,
+    minWidth: 120,
+    marginBottom: 0,
+  },
+  importAddRow: {
+    paddingVertical: 10,
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  importAddRowText: {
+    fontFamily: fonts.sansSemi,
+    fontSize: 14,
+    color: colors.terracotta,
+  },
+  list: { flex: 1 },
+  listContent: {
+    paddingHorizontal: 22,
+    paddingTop: 8,
+  },
+  empty: {
+    textAlign: 'center',
+    marginTop: 40,
+    paddingHorizontal: 20,
+    fontFamily: fonts.sans,
+    fontSize: 15,
     color: colors.textMuted,
     lineHeight: 22,
   },
-  groupedWrap: {
-    paddingTop: 4,
-    gap: 22,
+  section: {
+    marginBottom: 26,
   },
-  categoryBlock: {
-    gap: 10,
+  sectionTitle: {
+    fontFamily: fonts.sansSemi,
+    fontSize: 11,
+    letterSpacing: 0.8,
+    color: colors.textMuted,
+    marginBottom: 12,
   },
-  categoryTitle: {
+  sectionCount: {
+    fontFamily: fonts.sansSemi,
+    color: colors.textMuted,
+  },
+  itemCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.surface,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    marginBottom: 10,
+    gap: 12,
+  },
+  itemEmoji: {
+    fontSize: 36,
+  },
+  itemBody: {
+    flex: 1,
+    minWidth: 0,
+  },
+  itemName: {
     fontFamily: fonts.serifSemi,
-    fontSize: 18,
+    fontSize: 17,
     color: colors.text,
   },
-  chipsWrap: {
+  itemSub: {
+    marginTop: 4,
+    fontFamily: fonts.sans,
+    fontSize: 13,
+    color: colors.textMuted,
+  },
+  itemSubWarn: {
+    color: '#C44B4B',
+    fontFamily: fonts.sansSemi,
+  },
+  stepper: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  stepBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: colors.peach,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  stepBtnText: {
+    fontSize: 18,
+    fontFamily: fonts.sansSemi,
+    color: colors.text,
+    marginTop: -2,
+  },
+  stepQty: {
+    minWidth: 24,
+    textAlign: 'center',
+    fontFamily: fonts.sansSemi,
+    fontSize: 16,
+    color: colors.text,
+  },
+  addDashed: {
+    marginTop: 4,
+    paddingVertical: 18,
+    paddingHorizontal: 16,
+    borderRadius: radii.md,
+    borderWidth: 1.5,
+    borderStyle: 'dashed',
+    borderColor: colors.terracottaSoft,
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.5)',
+  },
+  addDashedText: {
+    fontFamily: fonts.sansSemi,
+    fontSize: 14,
+    color: colors.terracotta,
+  },
+  fabWrap: {
+    position: 'absolute',
+    right: 20,
+    alignItems: 'flex-end',
+  },
+  fabTooltip: {
+    maxWidth: 200,
+    marginBottom: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: radii.sm,
+    backgroundColor: colors.chatBar,
+  },
+  fabTooltipText: {
+    fontFamily: fonts.sansSemi,
+    fontSize: 11,
+    color: 'rgba(255,255,255,0.92)',
+    lineHeight: 16,
+  },
+  fab: {
+    width: 58,
+    height: 58,
+    borderRadius: 29,
+    backgroundColor: colors.terracotta,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.12,
+    shadowRadius: 6,
+    elevation: 5,
+  },
+  modalOverlay: {
+    flex: 1,
+    justifyContent: 'flex-end',
+    backgroundColor: 'rgba(0,0,0,0.35)',
+  },
+  modalDismiss: {
+    flex: 1,
+  },
+  modalSheet: {
+    backgroundColor: colors.background,
+    borderTopLeftRadius: radii.lg,
+    borderTopRightRadius: radii.lg,
+    paddingHorizontal: 22,
+    paddingTop: 22,
+    paddingBottom: 32,
+  },
+  modalTitle: {
+    fontFamily: fonts.serifBold,
+    fontSize: 22,
+    color: colors.text,
+    marginBottom: 16,
+  },
+  modalLabel: {
+    fontFamily: fonts.sansSemi,
+    fontSize: 12,
+    color: colors.textMuted,
+    marginBottom: 8,
+    marginTop: 8,
+  },
+  modalInput: {
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radii.md,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    fontFamily: fonts.sans,
+    fontSize: 16,
+    color: colors.text,
+    backgroundColor: colors.surface,
+  },
+  modalChipRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    alignItems: 'center',
-    gap: 10,
+    gap: 8,
+    marginBottom: 4,
   },
-  chip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    maxWidth: '100%',
-    paddingLeft: 14,
-    paddingRight: 6,
+  modalCatChip: {
+    paddingHorizontal: 14,
     paddingVertical: 8,
     borderRadius: radii.pill,
     borderWidth: 1,
     borderColor: colors.border,
     backgroundColor: colors.surface,
-    gap: 4,
   },
-  chipLabel: {
-    flexShrink: 1,
+  modalCatChipOn: {
+    backgroundColor: colors.terracotta,
+    borderColor: colors.terracotta,
+  },
+  modalCatChipText: {
     fontFamily: fonts.sansSemi,
-    fontSize: 14,
+    fontSize: 13,
     color: colors.text,
   },
-  chipRemove: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
+  modalCatChipTextOn: {
+    color: colors.white,
+  },
+  modalStepper: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 16,
+    marginVertical: 4,
+  },
+  modalStepBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: colors.peach,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: colors.pinkTag,
+  },
+  modalQtyNum: {
+    fontFamily: fonts.sansSemi,
+    fontSize: 20,
+    color: colors.text,
+    minWidth: 36,
+    textAlign: 'center',
+  },
+  modalPrimary: {
+    marginTop: 22,
+    backgroundColor: colors.terracotta,
+    borderRadius: radii.md,
+    paddingVertical: 16,
+    alignItems: 'center',
+  },
+  modalPrimaryText: {
+    fontFamily: fonts.sansSemi,
+    fontSize: 16,
+    color: colors.white,
+  },
+  modalCancel: {
+    marginTop: 12,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  modalCancelText: {
+    fontFamily: fonts.sansSemi,
+    fontSize: 15,
+    color: colors.textMuted,
   },
 });

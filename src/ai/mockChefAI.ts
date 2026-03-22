@@ -1,10 +1,12 @@
-import type { DemoRecipe, PantryItem, UserProfile } from '../data/types';
+import type { DemoRecipe, UserProfile } from '../data/types';
 import {
-  DEMO_PANTRY,
+  computeRecipeMissingFromPantry,
   DEMO_PROFILE,
   DEMO_RECIPES,
-  getFullyStockedRecipes,
+  getRecipesAlmostInPantry,
+  getRecipesFullyInPantry,
 } from '../data';
+import type { PantryStockItem } from '../pantry/types';
 
 function profileSummary(p: UserProfile): string {
   return [
@@ -16,14 +18,22 @@ function profileSummary(p: UserProfile): string {
   ].join('\n');
 }
 
-function expiringSoon(pantry: PantryItem[], days = 5): PantryItem[] {
-  const now = Date.now();
-  const ms = days * 86400000;
-  return pantry.filter((i) => {
-    if (!i.expiresAt) return false;
-    const t = new Date(i.expiresAt).getTime();
-    return t - now >= 0 && t - now <= ms;
-  });
+function lowStockHighlight(items: PantryStockItem[]): string {
+  const low = items.filter((i) => i.quantity <= i.lowStockAt);
+  if (low.length === 0) return '';
+  return `Items running low: ${low.map((i) => i.name).join(', ')}. `;
+}
+
+function formatPantryLines(items: PantryStockItem[]): string {
+  if (items.length === 0) {
+    return 'Your in-app pantry is empty — add items on the Pantry tab or send a grocery photo to the AI there.';
+  }
+  return items
+    .map(
+      (i) =>
+        `• ${i.name} — ×${i.quantity}${i.unitLabel ? ` ${i.unitLabel}` : ''} (${i.category})`
+    )
+    .join('\n');
 }
 
 function allergyConflict(
@@ -40,13 +50,18 @@ function allergyConflict(
   return null;
 }
 
-export function formatRecipePlan(recipe: DemoRecipe, profile: UserProfile): string {
+export function formatRecipePlan(
+  recipe: DemoRecipe,
+  profile: UserProfile,
+  liveMissing?: string[]
+): string {
   const warn = allergyConflict(recipe, profile);
   const ing = recipe.ingredients.map((x) => `• ${x.amount} ${x.name}`).join('\n');
   const steps = recipe.steps.map((s, i) => `${i + 1}. ${s}`).join('\n');
+  const missingList = liveMissing ?? recipe.missingFromPantry;
   const missing =
-    recipe.missingFromPantry.length > 0
-      ? `\n\nYou’d still need: ${recipe.missingFromPantry.map((m) => `+ ${m}`).join(', ')}.`
+    missingList.length > 0
+      ? `\n\nYou’d still need: ${missingList.map((m) => `+ ${m}`).join(', ')}.`
       : '';
 
   return [
@@ -83,19 +98,27 @@ function pickSuggestion(recipes: DemoRecipe[], profile: UserProfile): DemoRecipe
   return pool[0] ?? recipes[0];
 }
 
-export function explainRecipeById(recipeId: string): string | null {
+export function explainRecipeById(
+  recipeId: string,
+  pantryItems?: PantryStockItem[]
+): string | null {
   const recipe = DEMO_RECIPES.find((r) => r.id === recipeId);
   if (!recipe) return null;
-  return formatRecipePlan(recipe, DEMO_PROFILE);
+  const missing =
+    pantryItems != null
+      ? computeRecipeMissingFromPantry(recipe, pantryItems)
+      : recipe.missingFromPantry;
+  return formatRecipePlan(recipe, DEMO_PROFILE, missing);
 }
 
 /**
- * Demo “chef” — swap for a real LLM + tools later.
- * See user-facing docs in the project response for production needs.
+ * Offline / fallback chef — uses the same live pantry as the rest of the app.
  */
-export function getMockChefReply(userMessage: string): string {
+export function getMockChefReply(
+  userMessage: string,
+  pantryItems: PantryStockItem[]
+): string {
   const profile = DEMO_PROFILE;
-  const pantry = DEMO_PANTRY;
   const lower = userMessage.toLowerCase().trim();
   if (!lower) {
     return 'Ask me what to cook, how to fix a dish, or say a recipe name for step-by-step help.';
@@ -103,7 +126,8 @@ export function getMockChefReply(userMessage: string): string {
 
   const byName = findRecipeByMention(userMessage);
   if (byName) {
-    return formatRecipePlan(byName, profile);
+    const missing = computeRecipeMissingFromPantry(byName, pantryItems);
+    return formatRecipePlan(byName, profile, missing);
   }
 
   if (
@@ -111,27 +135,23 @@ export function getMockChefReply(userMessage: string): string {
       lower
     )
   ) {
-    const stocked = getFullyStockedRecipes(DEMO_RECIPES);
-    const choice = pickSuggestion(stocked, profile);
-    const soon = expiringSoon(pantry);
-    const useFirst =
-      soon.length > 0
-        ? `Your pantry has perishables to use soon: ${soon.map((i) => i.name).join(', ')}. `
-        : '';
-    return `${useFirst}Based on your saved preferences, I’d start with:\n\n${formatRecipePlan(choice, profile)}`;
+    const stocked = getRecipesFullyInPantry(DEMO_RECIPES, pantryItems);
+    const almost = getRecipesAlmostInPantry(DEMO_RECIPES, pantryItems);
+    const useFirst = lowStockHighlight(pantryItems);
+    if (stocked.length > 0) {
+      const choice = pickSuggestion(stocked, profile);
+      return `${useFirst}Based on your saved preferences and current pantry, I’d start with:\n\n${formatRecipePlan(choice, profile, computeRecipeMissingFromPantry(choice, pantryItems))}`;
+    }
+    if (almost.length > 0) {
+      const choice = pickSuggestion(almost, profile);
+      const miss = computeRecipeMissingFromPantry(choice, pantryItems);
+      return `${useFirst}You’re close — pick up ${miss.join(', ')} for:\n\n${formatRecipePlan(choice, profile, miss)}`;
+    }
+    return `${useFirst}Nothing in the recipe list fully matches your pantry yet. Open Pantry to add ingredients, or ask for a recipe by name.`;
   }
 
-  if (/pantry|what do i have|expire|perish/.test(lower)) {
-    const soon = expiringSoon(pantry, 7);
-    const lines = pantry.map((i) => {
-      const ex = i.expiresAt ? ` (use by ${i.expiresAt})` : '';
-      return `• ${i.name} — ${i.quantity}${ex}`;
-    });
-    const extra =
-      soon.length > 0
-        ? `\n\nUse soon: ${soon.map((i) => i.name).join(', ')}.`
-        : '';
-    return `Here’s your demo pantry:\n${lines.join('\n')}${extra}`;
+  if (/pantry|what do i have|expire|perish|stock/.test(lower)) {
+    return `Here’s what’s in your app pantry:\n${formatPantryLines(pantryItems)}`;
   }
 
   if (/allerg|diet|preference|profile/.test(lower)) {
@@ -147,8 +167,8 @@ export function getMockChefReply(userMessage: string): string {
   }
 
   return [
-    'I’m a demo chef wired to your sample pantry + profile.',
-    'Try: “Suggest dinner”, “What’s in my pantry?”, “Chicken Tikka Masala step by step”, or “My allergies”.',
+    'I’m the offline chef — I see your live Pantry list from the app.',
+    'Try: “Suggest dinner”, “What’s in my pantry?”, a recipe name, or “My allergies”.',
     `\nYour context snapshot:\n${profileSummary(profile)}`,
   ].join('\n');
 }

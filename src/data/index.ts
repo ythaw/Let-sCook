@@ -27,3 +27,13 @@ export function getAlmostThereRecipes(recipes: DemoRecipe[]): DemoRecipe[] {
 export function getRecipeById(id: string): DemoRecipe | undefined {
   return DEMO_RECIPES.find((r) => r.id === id);
 }
+
+export {
+  applyRecipeConsumption,
+  computeRecipeMissingFromPantry,
+  getRecipesAlmostInPantry,
+  getRecipesFullyInPantry,
+  pantryCoversIngredient,
+  previewRecipeConsumption,
+  type ConsumptionPreviewLine,
+} from './recipePantryMatch';

@@ -1,9 +1,24 @@
+export type {
+  PantryCategoryId,
+  PantryStockItem,
+} from './types';
 export {
-  addMultiplePantryItemsDeduped,
-  addPantryItemDeduped,
-  normalizePantryItem,
-  type AddMultiplePantryItemsResult,
-  type AddPantryItemResult,
+  PANTRY_CATEGORY_EMOJI,
+  PANTRY_CATEGORY_LABELS,
+  PANTRY_CATEGORY_ORDER,
+  PANTRY_SECTION_LABEL,
+} from './types';
+export {
+  capitalizeWords,
+  classifyIngredientCategory,
+  coercePantryCategory,
+  createPantryStockItem,
+  newPantryItemId,
+  normalizePantryName,
 } from './pantryItems';
 export { PantryProvider, usePantryContext } from './PantryContext';
-export { usePantry, type UsePantryResult } from './usePantry';
+export {
+  usePantry,
+  type ParsedPantryImport,
+  type UsePantryResult,
+} from './usePantry';

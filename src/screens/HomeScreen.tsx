@@ -13,13 +13,15 @@ import type { ChatScreenParams, HomeScreenProps } from '../navigation/types';
 import { colors, radii } from '../theme/tokens';
 import { fonts } from '../theme/typography';
 import {
+  computeRecipeMissingFromPantry,
   DEMO_PROFILE,
   DEMO_RECIPES,
   filterRecipesByMeal,
-  getAlmostThereRecipes,
-  getFullyStockedRecipes,
+  getRecipesAlmostInPantry,
+  getRecipesFullyInPantry,
   type MealFilter,
 } from '../data';
+import { usePantryContext } from '../pantry';
 
 const FILTERS: MealFilter[] = [
   'all',
@@ -50,14 +52,21 @@ export function HomeScreen({ navigation }: HomeScreenProps) {
   const { width } = useWindowDimensions();
   const cardW = Math.min(width * 0.58, 220);
   const [meal, setMeal] = useState<MealFilter>('all');
+  const { items: pantryItems } = usePantryContext();
 
   const base = useMemo(
     () => filterRecipesByMeal(DEMO_RECIPES, meal),
     [meal]
   );
 
-  const recommended = useMemo(() => getFullyStockedRecipes(base), [base]);
-  const almost = useMemo(() => getAlmostThereRecipes(base), [base]);
+  const recommended = useMemo(
+    () => getRecipesFullyInPantry(base, pantryItems),
+    [base, pantryItems]
+  );
+  const almost = useMemo(
+    () => getRecipesAlmostInPantry(base, pantryItems),
+    [base, pantryItems]
+  );
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -184,7 +193,7 @@ export function HomeScreen({ navigation }: HomeScreenProps) {
                   {r.minutes} min · {r.difficulty}
                 </Text>
                 <View style={styles.tagRow}>
-                  {r.missingFromPantry.map((m) => (
+                  {computeRecipeMissingFromPantry(r, pantryItems).map((m) => (
                     <View key={m} style={styles.tag}>
                       <Text style={styles.tagText}>+ {m}</Text>
                     </View>
