@@ -1,3 +1,4 @@
+export { buildChefUserProfile } from './buildChefUserProfile';
 export { initialsFromDisplayName } from './initialsFromDisplayName';
 export {
   DEFAULT_PERSISTED_PROFILE,
