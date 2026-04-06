@@ -1,9 +1,9 @@
 import type { UserProfile } from './types';
 
-/** Stand-in for future Profile screen — chatbot reads this for personalization. */
+/** Default chef context when Profile storage is empty; name matches `DEFAULT_PERSISTED_PROFILE`. */
 export const DEMO_PROFILE: UserProfile = {
-  displayName: 'Jordan Lee',
-  initials: 'JL',
+  displayName: 'Emma Carter',
+  initials: 'EC',
   allergies: ['peanuts', 'shellfish'],
   dietaryNotes: ['No pork'],
   cuisinePreferences: ['Italian', 'Mediterranean', 'Japanese'],

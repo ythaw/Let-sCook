@@ -71,7 +71,11 @@ export async function completeChefChat(options: {
       contents,
       generationConfig: {
         temperature: 0.55,
-        maxOutputTokens: 1800,
+        /**
+         * Tuned with chef prompt: overview replies stay short; one-recipe detail fits here.
+         * Keeps generations from running away and reduces MAX_TOKENS mid-sentence cuts.
+         */
+        maxOutputTokens: 4096,
       },
     }),
   });
@@ -106,15 +110,20 @@ export async function completeChefChat(options: {
     throw new Error(`Prompt blocked: ${block}`);
   }
 
-  const parts = data.candidates?.[0]?.content?.parts;
-  const text = parts?.map((p) => p.text).join('')?.trim();
+  const candidate = data.candidates?.[0];
+  const parts = candidate?.content?.parts;
+  let text = parts?.map((p) => p.text).join('')?.trim();
   if (!text) {
-    const reason = data.candidates?.[0]?.finishReason;
+    const reason = candidate?.finishReason;
     throw new Error(
       reason
         ? `Empty response (finish: ${reason}).`
         : 'Empty response from the model.'
     );
+  }
+  if (candidate?.finishReason === 'MAX_TOKENS') {
+    text +=
+      '\n\n_(That ran long—ask for one recipe at a time or say “continue” for the rest.)_';
   }
   return text;
 }

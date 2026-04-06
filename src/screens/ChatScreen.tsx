@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -31,12 +31,16 @@ import { completeChefChat, readGeminiConfigFromEnv } from '../ai/geminiChef';
 import { explainRecipeById, getMockChefReply } from '../ai/mockChefAI';
 import type { ChefChatTurn } from '../ai/chefChatTypes';
 import {
-  DEMO_PROFILE,
   getRecipeById,
   previewRecipeConsumption,
   type ConsumptionPreviewLine,
   type DemoRecipe,
+  type UserProfile,
 } from '../data';
+import {
+  buildChefUserProfile,
+  usePersistedProfilePreferences,
+} from '../profile';
 import type { ChatScreenProps } from '../navigation/types';
 import {
   parseVoiceCookCommand,
@@ -65,8 +69,6 @@ async function applyPlaybackAudioMode(): Promise<void> {
   });
 }
 
-const firstName = DEMO_PROFILE.displayName.split(' ')[0] ?? 'there';
-
 function toChefTurns(msgs: Msg[]): ChefChatTurn[] {
   return msgs
     .filter((m) => m.role === 'user' || m.role === 'assistant')
@@ -75,6 +77,8 @@ function toChefTurns(msgs: Msg[]): ChefChatTurn[] {
 }
 
 function buildOpeningThread(
+  firstName: string,
+  chefUserProfile: UserProfile,
   recommended: DemoRecipe[],
   explainRecipeId: string | undefined,
   liveModel: boolean,
@@ -126,7 +130,11 @@ function buildOpeningThread(
         role: 'user',
         text: `Walk me through “${recipe.title}”—ingredients, time, nutrition, and step-by-step.`,
       });
-      const body = explainRecipeById(explainRecipeId, pantryItems);
+      const body = explainRecipeById(
+        explainRecipeId,
+        pantryItems,
+        chefUserProfile
+      );
       if (body) {
         msgs.push({
           id: 'open-assistant',
@@ -151,6 +159,46 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
   );
   const { items: pantryItems, consumeRecipeIngredients } = usePantryContext();
 
+  const {
+    displayName,
+    dietaryRestrictions,
+    allergies,
+    likes,
+    dislikes,
+    preferredCookingTime,
+    availableEquipment,
+    goals,
+  } = usePersistedProfilePreferences();
+
+  const chefUserProfile = useMemo(
+    () =>
+      buildChefUserProfile({
+        displayName,
+        dietaryRestrictions,
+        allergies,
+        likes,
+        dislikes,
+        preferredCookingTime,
+        availableEquipment,
+        goals,
+      }),
+    [
+      displayName,
+      dietaryRestrictions,
+      allergies,
+      likes,
+      dislikes,
+      preferredCookingTime,
+      availableEquipment,
+      goals,
+    ]
+  );
+
+  const firstName = useMemo(
+    () => chefUserProfile.displayName.split(/\s+/)[0] ?? 'there',
+    [chefUserProfile.displayName]
+  );
+
   const { apiKey: geminiKey, model: geminiModel, apiBaseUrl: geminiBase } =
     useMemo(() => readGeminiConfigFromEnv(), []);
   const liveModel = Boolean(geminiKey);
@@ -167,6 +215,11 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
   >['recording'];
   const recordingRef = useRef<ChefRecording | null>(null);
   const soundRef = useRef<ExpoAV.Audio.Sound | null>(null);
+  /** Web TTS uses HTMLAudioElement; must stop explicitly (soundRef is only native). */
+  const webAudioRef = useRef<HTMLAudioElement | null>(null);
+  /** Resolves the in-flight `speakElevenLabsText` playback wait (mute/stop must unblock it). */
+  const resolvePlaybackWaitRef = useRef<(() => void) | null>(null);
+  const speakRepliesRef = useRef(true);
   const [isRecording, setIsRecording] = useState(false);
   const [voiceBusy, setVoiceBusy] = useState(false);
   const [speakReplies, setSpeakReplies] = useState(true);
@@ -177,7 +230,20 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
 
   const params = route.params;
 
+  useEffect(() => {
+    speakRepliesRef.current = speakReplies;
+  }, [speakReplies]);
+
   const stopPlayback = useCallback(async () => {
+    if (Platform.OS === 'web') {
+      const w = webAudioRef.current;
+      webAudioRef.current = null;
+      if (w) {
+        w.pause();
+        w.src = '';
+        w.load?.();
+      }
+    }
     const s = soundRef.current;
     soundRef.current = null;
     if (s) {
@@ -188,6 +254,9 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
         /* already unloaded */
       }
     }
+    const resolveWait = resolvePlaybackWaitRef.current;
+    resolvePlaybackWaitRef.current = null;
+    if (resolveWait) resolveWait();
   }, []);
 
   /** ElevenLabs TTS + playback. Native File.write() expects one argument (bytes), not base64 + options. */
@@ -212,24 +281,39 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
           text: plainText,
           modelId: ttsModel,
         });
+        if (options.honorSpeakToggle && !speakRepliesRef.current) {
+          return;
+        }
         if (Platform.OS === 'web') {
           const blob = new Blob([ab], { type: 'audio/mpeg' });
           const url = URL.createObjectURL(blob);
           await new Promise<void>((resolve, reject) => {
             const HtmlAudio = globalThis.Audio;
             if (typeof HtmlAudio === 'undefined') {
-              throw new Error('Web Audio not available');
+              reject(new Error('Web Audio not available'));
+              return;
             }
             const audioEl = new HtmlAudio(url);
-            audioEl.onended = () => {
-              URL.revokeObjectURL(url);
+            webAudioRef.current = audioEl;
+            let settled = false;
+            const settle = () => {
+              if (settled) return;
+              settled = true;
+              resolvePlaybackWaitRef.current = null;
               resolve();
             };
-            audioEl.onerror = () => {
+            resolvePlaybackWaitRef.current = settle;
+            audioEl.onended = () => {
+              webAudioRef.current = null;
               URL.revokeObjectURL(url);
-              reject(new Error('Playback failed'));
+              settle();
             };
-            void audioEl.play().catch(reject);
+            audioEl.onerror = () => {
+              webAudioRef.current = null;
+              URL.revokeObjectURL(url);
+              settle();
+            };
+            void audioEl.play().catch(() => settle());
           });
         } else {
           const outfile = new File(Paths.cache, `chef-tts-${Date.now()}.mp3`);
@@ -241,14 +325,29 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
           );
           soundRef.current = sound;
           await new Promise<void>((resolve) => {
-            sound.setOnPlaybackStatusUpdate((status) => {
-              if (!status.isLoaded) return;
-              if (status.didJustFinish) {
+            let settled = false;
+            const settle = () => {
+              if (settled) return;
+              settled = true;
+              resolvePlaybackWaitRef.current = null;
+              try {
                 sound.setOnPlaybackStatusUpdate(null);
+              } catch {
+                /* ignore */
+              }
+              resolve();
+            };
+            resolvePlaybackWaitRef.current = settle;
+            sound.setOnPlaybackStatusUpdate((status) => {
+              if (!status.isLoaded) {
+                settle();
+                return;
+              }
+              if (status.didJustFinish) {
                 void sound
                   .unloadAsync()
-                  .then(() => resolve())
-                  .catch(() => resolve());
+                  .then(settle)
+                  .catch(settle);
               }
             });
           });
@@ -262,6 +361,13 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
     },
     [elevenLabsCfg, speakReplies, stopPlayback]
   );
+
+  const onSpeakRepliesToggle = useCallback(() => {
+    setSpeakReplies((prev) => {
+      if (prev) void stopPlayback();
+      return !prev;
+    });
+  }, [stopPlayback]);
 
   const playAssistantSpeech = useCallback(
     (plainText: string) =>
@@ -284,6 +390,8 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
       setPickerRecipes(resolved);
       setMessages(
         buildOpeningThread(
+          firstName,
+          chefUserProfile,
           resolved,
           params?.explainRecipeId,
           liveModel,
@@ -341,7 +449,8 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
         if (geminiKey) {
           const systemPrompt = buildChefSystemPrompt(
             pickerRecipes.map((r) => r.title),
-            pantryItems
+            pantryItems,
+            chefUserProfile
           );
           const history = toChefTurns([...messages, userMsg]);
           assistantText = await completeChefChat({
@@ -353,7 +462,7 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
           });
         } else {
           assistantText =
-            explainRecipeById(recipe.id, pantryItems) ??
+            explainRecipeById(recipe.id, pantryItems, chefUserProfile) ??
             'I couldn’t find that recipe.';
         }
         setMessages((prev) => [
@@ -365,18 +474,15 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
       } catch (e) {
         const err = e instanceof Error ? e.message : String(e);
         const fallback =
-          explainRecipeById(recipe.id, pantryItems) ??
+          explainRecipeById(recipe.id, pantryItems, chefUserProfile) ??
           'I couldn’t find that recipe.';
+        const offlineText = `Couldn’t reach the model (${err}). Offline version:\n\n${fallback}`;
         setMessages((prev) => [
           ...prev,
-          {
-            id: `a-${Date.now()}`,
-            role: 'assistant',
-            text: `Couldn’t reach the model (${err}). Offline version:\n\n${fallback}`,
-          },
+          { id: `a-${Date.now()}`, role: 'assistant', text: offlineText },
         ]);
         setPantryCookRecipe(recipe);
-        void playAssistantSpeech(fallback);
+        void playAssistantSpeech(offlineText);
       } finally {
         setSending(false);
         requestAnimationFrame(() =>
@@ -392,6 +498,7 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
       pickerRecipes,
       messages,
       pantryItems,
+      chefUserProfile,
       playAssistantSpeech,
     ]
   );
@@ -412,7 +519,8 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
         if (geminiKey) {
           const systemPrompt = buildChefSystemPrompt(
             pickerRecipes.map((r) => r.title),
-            pantryItems
+            pantryItems,
+            chefUserProfile
           );
           const history = toChefTurns([...messages, userMsg]);
           assistantText = await completeChefChat({
@@ -423,7 +531,7 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
             apiBaseUrl: geminiBase,
           });
         } else {
-          assistantText = getMockChefReply(t, pantryItems);
+          assistantText = getMockChefReply(t, pantryItems, chefUserProfile);
         }
         setMessages((prev) => [
           ...prev,
@@ -432,16 +540,13 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
         void playAssistantSpeech(assistantText);
       } catch (e) {
         const err = e instanceof Error ? e.message : String(e);
-        const fallback = getMockChefReply(t, pantryItems);
+        const fallback = getMockChefReply(t, pantryItems, chefUserProfile);
+        const offlineText = `Couldn’t reach the model (${err}). Offline reply:\n\n${fallback}`;
         setMessages((prev) => [
           ...prev,
-          {
-            id: `a-${Date.now()}`,
-            role: 'assistant',
-            text: `Couldn’t reach the model (${err}). Offline reply:\n\n${fallback}`,
-          },
+          { id: `a-${Date.now()}`, role: 'assistant', text: offlineText },
         ]);
-        void playAssistantSpeech(fallback);
+        void playAssistantSpeech(offlineText);
       } finally {
         setSending(false);
         requestAnimationFrame(() =>
@@ -457,6 +562,7 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
       geminiBase,
       pickerRecipes,
       pantryItems,
+      chefUserProfile,
       playAssistantSpeech,
     ]
   );
@@ -933,7 +1039,7 @@ export function ChatScreen({ navigation, route }: ChatScreenProps) {
           {elevenVoiceReady ? (
             <Pressable
               style={styles.speakToggle}
-              onPress={() => setSpeakReplies((v) => !v)}
+              onPress={onSpeakRepliesToggle}
               hitSlop={8}
               accessibilityLabel={
                 speakReplies ? 'Turn off read aloud' : 'Turn on read aloud'

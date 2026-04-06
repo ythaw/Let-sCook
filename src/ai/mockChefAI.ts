@@ -1,7 +1,6 @@
 import type { DemoRecipe, UserProfile } from '../data/types';
 import {
   computeRecipeMissingFromPantry,
-  DEMO_PROFILE,
   DEMO_RECIPES,
   getRecipesAlmostInPantry,
   getRecipesFullyInPantry,
@@ -100,7 +99,8 @@ function pickSuggestion(recipes: DemoRecipe[], profile: UserProfile): DemoRecipe
 
 export function explainRecipeById(
   recipeId: string,
-  pantryItems?: PantryStockItem[]
+  pantryItems: PantryStockItem[] | undefined,
+  profile: UserProfile
 ): string | null {
   const recipe = DEMO_RECIPES.find((r) => r.id === recipeId);
   if (!recipe) return null;
@@ -108,7 +108,7 @@ export function explainRecipeById(
     pantryItems != null
       ? computeRecipeMissingFromPantry(recipe, pantryItems)
       : recipe.missingFromPantry;
-  return formatRecipePlan(recipe, DEMO_PROFILE, missing);
+  return formatRecipePlan(recipe, profile, missing);
 }
 
 /**
@@ -116,9 +116,9 @@ export function explainRecipeById(
  */
 export function getMockChefReply(
   userMessage: string,
-  pantryItems: PantryStockItem[]
+  pantryItems: PantryStockItem[],
+  profile: UserProfile
 ): string {
-  const profile = DEMO_PROFILE;
   const lower = userMessage.toLowerCase().trim();
   if (!lower) {
     return 'Ask me what to cook, how to fix a dish, or say a recipe name for step-by-step help.';
